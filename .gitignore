@@ -1,36 +1,6 @@
-# Dependencies
 node_modules/
-
-# Environment
 .env
 .env.local
-
-# Logs
 *.log
-npm-debug.log*
-
-# OS
 .DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Build
-dist/
-build/
-.next/
-
-# Video files (too large for GitHub)
-public/uploads/*.mp4
-public/uploads/*.mov
-public/uploads/*.avi
-public/output/*.mp4
-public/output/*.mov
-
-# Keep directories
-!public/uploads/.gitkeep
-!public/output/.gitkeep
+.vercel

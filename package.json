@@ -1,0 +1,8 @@
+{
+  "name": "cutflow-ai",
+  "version": "1.0.0",
+  "description": "AI-powered video editor with natural language commands",
+  "dependencies": {
+    "axios": "^1.6.2"
+  }
+}

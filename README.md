@@ -1,88 +1,43 @@
-# 🎬 CutFlow AI — Video Editor
+# CutFlow AI
 
-Edit videos with natural language. Just tell the AI what you want — powered by Google Gemini (free!).
+AI-powered video editor with natural language commands. Edit videos by chatting — "make it cinematic", "speed up 2x", "add blur effect".
 
-## ⚡ Quick Start
+## Features
+
+- Chat-based video editing
+- Client-side FFmpeg processing (no server uploads)
+- Free Gemini AI integration
+- Effects: blur, sharpen, grayscale, sepia, vintage
+- Color grading: warm, cool, cinematic, vintage
+- Speed control: slow motion, speed up
+- Trim, crop, resize
+- Audio: mute, volume control
+
+## How it works
+
+1. Upload video (stays in your browser)
+2. Chat with AI to describe edits
+3. FFmpeg processes video client-side
+4. Download result
+
+## Deploy to Vercel
 
 ```bash
-cd ai-video-editor/server
 npm install
-npm start
+vercel
 ```
 
-Then open **http://localhost:3001** in your browser.
+Or connect your GitHub repo at [vercel.com](https://vercel.com).
 
-## 🔑 Setup Gemini (30 seconds — FREE!)
+## Setup
 
-1. Go to [Google AI Studio](https://aistudio.google.com/apikey)
-2. Click **"Create API Key"** — no credit card needed
-3. Copy the key (starts with `AIzaSy...`)
-4. In CutFlow AI, click **⚙️ Settings** → paste your key → Save
+1. Get a free Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
+2. Enter it on the landing page
+3. Upload a video and start editing
 
-That's it! Gemini 2.5 Flash gives you **10 requests/min, 250/day** for free.
+## Tech Stack
 
-## 💬 How to Use
-
-1. **Upload** a video (drag & drop)
-2. **Chat** with the AI editor on the right
-3. **Watch** it edit your video
-4. **Export** the result
-
-### Try These Commands
-
-```
-"Add stylish white captions at the bottom"
-"Apply a cinematic warm color grade"  
-"Trim the first 5 seconds"
-"Speed up to 2x"
-"Add a blur effect"
-"Make it black and white"
-"Crop to a square"
-"Mute the audio"
-"Slow motion at half speed"
-"Add a vintage filter"
-```
-
-## 🛠️ Features
-
-- 💬 **Chat-to-Edit** — describe edits in plain English
-- 🎨 **Color Grades** — warm, cool, cinematic, vintage
-- ✂️ **Smart Cuts** — trim, crop, resize
-- ⚡ **Speed Control** — slow-mo, speed up
-- 📝 **Captions** — styled text overlays
-- 🌫️ **Effects** — blur, sharpen, grayscale, sepia, emboss
-- 🔊 **Audio** — mute, volume, extract audio
-- 🤖 **Multi-Provider** — Gemini (free), OpenAI, or custom endpoint
-- 📐 **Timeline** — visual video player with seek
-
-## 🏗️ Tech Stack
-
-| Layer | Tech |
-|-------|------|
-| Frontend | Vanilla HTML/CSS/JS |
-| Backend | Node.js + Express |
-| Video | FFmpeg (fluent-ffmpeg) |
-| Real-time | WebSocket |
-| AI | Google Gemini 2.5 Flash (free) |
-
-## 🤖 AI Providers
-
-| Provider | Free? | Setup |
-|----------|-------|-------|
-| **Google Gemini** | ✅ Yes (250/day) | [Get API key](https://aistudio.google.com/apikey) |
-| OpenAI | ❌ Paid | OpenAI platform |
-| Custom | Any | Your own endpoint |
-
-## 📁 Project Structure
-
-```
-ai-video-editor/
-├── server/
-│   ├── index.js            # Backend: Express + FFmpeg + AI
-│   └── package.json
-├── public/
-│   ├── index.html          # Main UI
-│   ├── app.js              # Frontend logic
-│   └── styles/main.css     # Dark theme styling
-└── README.md
-```
+- Frontend: Vanilla HTML/CSS/JS
+- Video Processing: FFmpeg (WebAssembly)
+- AI: Google Gemini
+- Hosting: Vercel
