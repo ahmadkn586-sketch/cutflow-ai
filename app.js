@@ -45,7 +45,7 @@ async function initFFmpeg() {
 
 // Check for API key on load
 window.addEventListener('DOMContentLoaded', () => {
-  const apiKey = localStorage.getItem('gemini_api_key');
+  const apiKey = localStorage.getItem('api_key');
   if (apiKey) {
     apiKeyBanner.style.display = 'none';
     uploadZone.style.display = 'block';
@@ -56,7 +56,7 @@ window.addEventListener('DOMContentLoaded', () => {
 landingSaveKey.addEventListener('click', () => {
   const key = landingApiKey.value.trim();
   if (key) {
-    localStorage.setItem('gemini_api_key', key);
+    localStorage.setItem('api_key', key);
     apiKeyBanner.style.display = 'none';
     uploadZone.style.display = 'block';
   }
@@ -168,7 +168,7 @@ async function sendMessage() {
   const text = chatInput.value.trim();
   if (!text || isProcessing || !currentVideoBlob) return;
 
-  const apiKey = localStorage.getItem('gemini_api_key');
+  const apiKey = localStorage.getItem('api_key');
   if (!apiKey) {
     addMessage('ai', 'Please set your API key first');
     return;
@@ -189,7 +189,7 @@ async function sendMessage() {
       body: JSON.stringify({
         command: text,
         apiKey,
-        model: localStorage.getItem('gemini_model') || 'gemini-2.5-flash'
+        model: localStorage.getItem('model') || 'llama-3.3-70b-versatile'
       })
     });
 
@@ -350,8 +350,8 @@ function addMessage(sender, text) {
 // Settings modal
 settingsBtn.addEventListener('click', () => {
   settingsModal.style.display = 'flex';
-  document.getElementById('settings-api-key').value = localStorage.getItem('gemini_api_key') || '';
-  document.getElementById('settings-model').value = localStorage.getItem('gemini_model') || 'gemini-2.5-flash';
+  document.getElementById('settings-api-key').value = localStorage.getItem('api_key') || '';
+  document.getElementById('settings-model').value = localStorage.getItem('model') || 'llama-3.3-70b-versatile';
 });
 
 modalClose.addEventListener('click', () => {
@@ -367,8 +367,8 @@ document.getElementById('save-settings').addEventListener('click', () => {
   const model = document.getElementById('settings-model').value;
   
   if (key) {
-    localStorage.setItem('gemini_api_key', key);
-    localStorage.setItem('gemini_model', model);
+    localStorage.setItem('api_key', key);
+    localStorage.setItem('model', model);
     settingsModal.style.display = 'none';
     addMessage('ai', '✓ Settings saved');
   }

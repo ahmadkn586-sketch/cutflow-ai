@@ -79,18 +79,26 @@ Respond with ONLY a valid JSON object (no markdown, no explanation outside JSON)
 Be specific with parameters.`;
 
     const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-2.5-flash'}:generateContent?key=${apiKey}`,
+      'https://api.groq.com/openai/v1/chat/completions',
       {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 2048,
-        }
+        model: model || 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: 'You are a helpful video editing assistant. Always respond with valid JSON.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 2048,
       },
-      { timeout: 60000 }
+      {
+        timeout: 60000,
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      }
     );
 
-    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = response.data?.choices?.[0]?.message?.content;
     
     if (!text) {
       throw new Error('No response from AI');

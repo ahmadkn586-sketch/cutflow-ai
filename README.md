@@ -1,43 +1,30 @@
 # CutFlow AI
 
-AI-powered video editor with natural language commands. Edit videos by chatting — "make it cinematic", "speed up 2x", "add blur effect".
+Edit videos with natural language. Upload a video and say things like "make it cinematic" or "speed up 2x" — the AI understands what you want and FFmpeg processes it right in your browser.
 
 ## Features
 
 - Chat-based video editing
-- Client-side FFmpeg processing (no server uploads)
-- Free Gemini AI integration
-- Effects: blur, sharpen, grayscale, sepia, vintage
-- Color grading: warm, cool, cinematic, vintage
-- Speed control: slow motion, speed up
-- Trim, crop, resize
-- Audio: mute, volume control
-
-## How it works
-
-1. Upload video (stays in your browser)
-2. Chat with AI to describe edits
-3. FFmpeg processes video client-side
-4. Download result
+- Runs entirely in browser (no server upload needed)
+- Free Groq AI integration (Llama 3.3)
+- Client-side FFmpeg processing
+- Apple-style minimal UI
 
 ## Deploy to Vercel
 
-```bash
-npm install
-vercel
-```
-
-Or connect your GitHub repo at [vercel.com](https://vercel.com).
+1. Fork this repo
+2. Go to [vercel.com](https://vercel.com) and import your fork
+3. Deploy!
 
 ## Setup
 
-1. Get a free Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
-2. Enter it on the landing page
+1. Get a free Groq API key from [console.groq.com](https://console.groq.com)
+2. Paste it when prompted in the app
 3. Upload a video and start editing
 
 ## Tech Stack
 
 - Frontend: Vanilla HTML/CSS/JS
-- Video Processing: FFmpeg (WebAssembly)
-- AI: Google Gemini
-- Hosting: Vercel
+- Video Processing: FFmpeg.wasm (runs in browser)
+- AI: Groq (Llama 3.3)
+- Hosting: Vercel (serverless)
