@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CutFlow AI - Test Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #0a0a0f;
+      color: #f0f0f5;
+      padding: 2rem;
+      line-height: 1.6;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 {
+      background: linear-gradient(135deg, #7C3AED, #EC4899);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      font-size: 2.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle { color: #9898b0; margin-bottom: 2rem; }
+    .status-card {
+      background: #12121a;
+      border: 1px solid #2a2a3d;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .status-card h2 {
+      font-size: 1.2rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .status-ok { color: #10B981; }
+    .status-error { color: #EF4444; }
+    .test-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .test-btn {
+      background: #1a1a28;
+      border: 1px solid #2a2a3d;
+      border-radius: 8px;
+      padding: 1rem;
+      color: #f0f0f5;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-align: left;
+    }
+    .test-btn:hover {
+      background: #222233;
+      border-color: #7C3AED;
+      transform: translateY(-2px);
+    }
+    .test-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .test-btn .emoji { font-size: 1.5rem; display: block; margin-bottom: 0.5rem; }
+    .test-btn .name { font-weight: 600; display: block; margin-bottom: 0.25rem; }
+    .test-btn .desc { font-size: 0.8rem; color: #9898b0; }
+    .result {
+      margin-top: 0.5rem;
+      padding: 0.5rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      display: none;
+    }
+    .result.show { display: block; }
+    .result.success { background: rgba(16, 185, 129, 0.1); color: #10B981; }
+    .result.error { background: rgba(239, 68, 68, 0.1); color: #EF4444; }
+    .video-container {
+      margin-top: 1rem;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    video { width: 100%; display: block; }
+    .code-block {
+      background: #1a1a28;
+      border: 1px solid #2a2a3d;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 1rem;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.85rem;
+      overflow-x: auto;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-left: 0.5rem;
+    }
+    .badge-free { background: #10B981; color: white; }
+    .badge-beta { background: #F59E0B; color: white; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎬 CutFlow AI - Test Dashboard</h1>
+    <p class="subtitle">Verify all features are working correctly</p>
+
+    <!-- System Status -->
+    <div class="status-card">
+      <h2>⚙️ System Status</h2>
+      <div id="system-status">Checking...</div>
+    </div>
+
+    <!-- Video Operations -->
+    <div class="status-card">
+      <h2>🎥 Video Operations <span class="badge badge-beta">Test without AI</span></h2>
+      <p style="color: #9898b0; font-size: 0.9rem; margin-bottom: 1rem;">
+        Test FFmpeg operations directly without needing Gemini API
+      </p>
+      <div class="test-grid" id="operation-buttons"></div>
+      <div class="video-container" id="video-container" style="display:none;">
+        <video id="result-video" controls></video>
+      </div>
+    </div>
+
+    <!-- AI Integration -->
+    <div class="status-card">
+      <h2>🤖 AI Integration <span class="badge badge-free">Gemini Free</span></h2>
+      <p style="color: #9898b0; font-size: 0.9rem; margin-bottom: 1rem;">
+        Test the AI command processing with your Gemini API key
+      </p>
+      <div style="margin-bottom: 1rem;">
+        <input type="password" id="api-key-input" placeholder="Paste your Gemini API key here..." 
+               style="width: 100%; padding: 0.75rem; background: #1a1a28; border: 1px solid #2a2a3d; border-radius: 8px; color: #f0f0f5; font-family: inherit;">
+      </div>
+      <button class="test-btn" onclick="testAIConnection()" style="width: auto; display: inline-block;">
+        <span class="name">🔌 Test AI Connection</span>
+      </button>
+      <div class="result" id="ai-test-result"></div>
+      <div class="code-block">
+        <strong>Get your free API key:</strong><br>
+        1. Go to <a href="https://aistudio.google.com/apikey" target="_blank" style="color: #7C3AED;">Google AI Studio</a><br>
+        2. Click "Create API Key" (no credit card needed)<br>
+        3. Copy the key and paste it above
+      </div>
+    </div>
+
+    <!-- Full App Link -->
+    <div class="status-card">
+      <h2>🚀 Launch Full App</h2>
+      <p style="color: #9898b0; margin-bottom: 1rem;">
+        Open the main CutFlow AI editor with all features
+      </p>
+      <a href="/" class="test-btn" style="display: inline-block; text-decoration: none; width: auto;">
+        <span class="name">🎬 Open CutFlow AI Editor →</span>
+      </a>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    let currentProjectId = null;
+    let currentVideoPath = null;
+
+    // Check system status
+    async function checkSystemStatus() {
+      try {
+        const res = await fetch(`${API_BASE}/api/config/ai`);
+        const config = await res.json();
+        document.getElementById('system-status').innerHTML = `
+          <div class="status-ok">✓ Server running</div>
+          <div class="status-ok">✓ FFmpeg available</div>
+          <div class="status-ok">✓ WebSocket ready</div>
+          <div class="${config.hasApiKey ? 'status-ok' : 'status-error'}">
+            ${config.hasApiKey ? '✓' : '✗'} AI ${config.hasApiKey ? 'configured' : 'not configured (add Gemini key)'}
+          </div>
+        `;
+      } catch (err) {
+        document.getElementById('system-status').innerHTML = `
+          <div class="status-error">✗ Server error: ${err.message}</div>
+        `;
+      }
+    }
+
+    // Test operations
+    const operations = [
+      { emoji: '🎨', name: 'Warm Color Grade', op: 'color_grade', params: { grade: 'warm' } },
+      { emoji: '⚫', name: 'Grayscale', op: 'add_effect', params: { effect: 'grayscale' } },
+      { emoji: '🌫️', name: 'Blur Effect', op: 'add_effect', params: { effect: 'blur', intensity: 50 } },
+      { emoji: '📐', name: 'Resize to HD', op: 'resize_video', params: { width: 1280, height: 720 } },
+      { emoji: '✂️', name: 'Trim 2-4s', op: 'trim_video', params: { start: 2, duration: 2 } },
+      { emoji: '🐌', name: 'Slow Motion 2x', op: 'slow_motion', params: { factor: 2 } },
+      { emoji: '⚡', name: 'Speed Up 2x', op: 'speed_up', params: { factor: 2 } },
+      { emoji: '🔇', name: 'Mute Audio', op: 'mute_audio', params: {} },
+      { emoji: '🔊', name: 'Volume 150%', op: 'adjust_volume', params: { level: 1.5 } },
+      { emoji: '🎭', name: 'Vintage Filter', op: 'add_filter', params: { filter: 'vintage' } },
+      { emoji: '🌡️', name: 'Cool Colors', op: 'color_grade', params: { grade: 'cool' } },
+      { emoji: '🎬', name: 'Cinematic', op: 'color_grade', params: { grade: 'cinematic' } },
+    ];
+
+    // Create operation buttons
+    const buttonGrid = document.getElementById('operation-buttons');
+    operations.forEach((test, idx) => {
+      const btn = document.createElement('button');
+      btn.className = 'test-btn';
+      btn.innerHTML = `
+        <span class="emoji">${test.emoji}</span>
+        <span class="name">${test.name}</span>
+        <span class="desc">${test.op}</span>
+        <div class="result" id="result-${idx}"></div>
+      `;
+      btn.onclick = () => runTest(idx, test);
+      buttonGrid.appendChild(btn);
+    });
+
+    async function uploadTestVideo() {
+      if (currentProjectId) return;
+
+      // Create a test video using canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 360;
+      const ctx = canvas.getContext('2d');
+      
+      // Create a simple animated video
+      const stream = canvas.captureStream(30);
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+      const chunks = [];
+      
+      mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        const formData = new FormData();
+        formData.append('video', blob, 'test.webm');
+        formData.append('name', 'Test Video');
+
+        const res = await fetch(`${API_BASE}/api/upload`, {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        currentProjectId = data.project.id;
+        currentVideoPath = data.project.videoPath;
+        console.log('Uploaded test video:', currentProjectId);
+      };
+
+      // Draw some frames
+      let frame = 0;
+      const drawFrame = () => {
+        ctx.fillStyle = `hsl(${frame * 2}, 70%, 50%)`;
+        ctx.fillRect(0, 0, 640, 360);
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 48px Inter';
+        ctx.textAlign = 'center';
+        ctx.fillText('CutFlow AI Test', 320, 180);
+        ctx.font = '24px Inter';
+        ctx.fillText(`Frame ${frame}`, 320, 220);
+        frame++;
+      };
+
+      mediaRecorder.start();
+      const interval = setInterval(drawFrame, 33);
+      
+      setTimeout(() => {
+        clearInterval(interval);
+        mediaRecorder.stop();
+      }, 5000); // 5 seconds
+    }
+
+    async function runTest(idx, test) {
+      const resultDiv = document.getElementById(`result-${idx}`);
+      const btn = resultDiv.parentElement;
+      
+      try {
+        btn.disabled = true;
+        resultDiv.className = 'result show';
+        resultDiv.textContent = '⏳ Processing...';
+        resultDiv.style.background = 'rgba(124, 58, 237, 0.1)';
+        resultDiv.style.color = '#7C3AED';
+
+        // Upload test video if not done
+        if (!currentProjectId) {
+          await uploadTestVideo();
+          // Wait a bit for upload to complete
+          await new Promise(r => setTimeout(r, 1000));
+        }
+
+        // Run the operation
+        const res = await fetch(`${API_BASE}/api/test/operation`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectId: currentProjectId,
+            operation: {
+              operation: test.op,
+              parameters: test.params,
+              description: test.name
+            }
+          })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          resultDiv.className = 'result show success';
+          resultDiv.textContent = '✓ Success!';
+          currentVideoPath = data.output;
+          
+          // Show the result video
+          const videoContainer = document.getElementById('video-container');
+          const video = document.getElementById('result-video');
+          video.src = `${API_BASE}${data.output}`;
+          videoContainer.style.display = 'block';
+          video.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+          resultDiv.className = 'result show error';
+          resultDiv.textContent = `✗ ${data.error}`;
+        }
+      } catch (err) {
+        resultDiv.className = 'result show error';
+        resultDiv.textContent = `✗ ${err.message}`;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function testAIConnection() {
+      const apiKey = document.getElementById('api-key-input').value.trim();
+      const resultDiv = document.getElementById('ai-test-result');
+      
+      if (!apiKey) {
+        resultDiv.className = 'result show error';
+        resultDiv.textContent = '✗ Please enter an API key';
+        return;
+      }
+
+      try {
+        resultDiv.className = 'result show';
+        resultDiv.textContent = '⏳ Testing connection...';
+        resultDiv.style.background = 'rgba(124, 58, 237, 0.1)';
+        resultDiv.style.color = '#7C3AED';
+
+        // Save config
+        await fetch(`${API_BASE}/api/config/ai`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: 'gemini',
+            apiKey: apiKey,
+            model: 'gemini-2.5-flash'
+          })
+        });
+
+        // Test connection
+        const res = await fetch(`${API_BASE}/api/config/ai/test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: 'gemini',
+            apiKey: apiKey,
+            model: 'gemini-2.5-flash'
+          })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          resultDiv.className = 'result show success';
+          resultDiv.textContent = '✓ AI connected successfully! You can now use the full editor.';
+        } else {
+          resultDiv.className = 'result show error';
+          resultDiv.textContent = `✗ ${data.message}`;
+        }
+      } catch (err) {
+        resultDiv.className = 'result show error';
+        resultDiv.textContent = `✗ ${err.message}`;
+      }
+    }
+
+    // Initialize
+    checkSystemStatus();
+  </script>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CutFlow AI</title>
+  <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+  <!-- Landing -->
+  <div id="landing-screen" class="screen active">
+    <div class="landing-container">
+      <h1 class="logo">CutFlow AI</h1>
+      <p class="tagline">Edit videos with natural language</p>
+
+      <div class="upload-zone" id="upload-zone">
+        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 16V4M12 4L8 8M12 4L16 8"/>
+          <path d="M20 16V18C20 19.1046 19.1046 20 18 20H6C4.89543 20 4 19.1046 4 18V16"/>
+        </svg>
+        <div class="upload-title">Upload video</div>
+        <div class="upload-subtitle">Drop file or click to browse</div>
+      </div>
+      <input type="file" id="video-upload" accept="video/*" hidden>
+
+      <div class="features">
+        <div class="feature">Chat to edit</div>
+        <div class="feature">Effects & filters</div>
+        <div class="feature">Auto captions</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Editor -->
+  <div id="editor-screen" class="screen">
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <div class="brand">CutFlow</div>
+        <div class="project-name" id="project-name">Untitled</div>
+      </div>
+      <div class="top-bar-right">
+        <button class="btn btn-ghost" id="settings-btn">Settings</button>
+        <button class="btn btn-primary" id="export-btn">Export</button>
+      </div>
+    </header>
+
+    <div class="editor-layout">
+      <div class="preview-area">
+        <div class="video-container">
+          <video id="video-player" controls></video>
+          <div class="processing-indicator" id="processing-indicator" style="display:none;">
+            <div class="spinner"></div>
+            <div id="processing-text">Processing...</div>
+            <div class="progress-bar">
+              <div class="progress-fill" id="progress-fill"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="timeline-container">
+          <div class="timeline-controls">
+            <button class="timeline-btn" id="play-btn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M8 5v14l11-7z"/>
+              </svg>
+            </button>
+            <button class="timeline-btn" id="stop-btn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12"/>
+              </svg>
+            </button>
+            <div class="time-display" id="time-display">0:00 / 0:00</div>
+          </div>
+          <div class="timeline" id="timeline">
+            <div class="timeline-track">
+              <div class="timeline-clip" id="main-clip"></div>
+            </div>
+            <div class="playhead" id="playhead"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-panel">
+        <div class="chat-header">
+          <h3>AI Editor</h3>
+        </div>
+
+        <div class="chat-messages" id="chat-messages">
+          <div class="message ai-message">
+            <div class="message-avatar">AI</div>
+            <div class="message-content">
+              <p>Upload a video and tell me what to edit. I can apply effects, adjust speed, trim, add captions, and more.</p>
+              <div class="suggestion-chips">
+                <button class="chip" data-command="Apply cinematic color grade">Cinematic grade</button>
+                <button class="chip" data-command="Trim first 5 seconds">Trim 5s</button>
+                <button class="chip" data-command="Speed up 2x">Speed 2x</button>
+                <button class="chip" data-command="Add blur effect">Blur</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="chat-input-area">
+          <div class="input-wrapper">
+            <textarea id="chat-input" placeholder="Tell me what to edit..." rows="1"></textarea>
+            <button class="send-btn" id="send-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 2L11 13M22 2L15 22L11 13L2 9L22 2Z"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal" id="settings-modal" style="display:none;">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button class="modal-close" id="modal-close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>API Endpoint</label>
+          <input type="text" id="ai-endpoint" placeholder="http://localhost:11434/api/generate">
+        </div>
+        <div class="form-group">
+          <label>Model</label>
+          <input type="text" id="ai-model" placeholder="llama2">
+        </div>
+        <div class="form-group">
+          <label>API Key (optional)</label>
+          <input type="password" id="ai-token" placeholder="Leave empty if not needed">
+        </div>
+        <button class="btn btn-primary" id="save-ai-config" style="width: 100%;">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
