@@ -43,10 +43,11 @@ async function initFFmpeg() {
       const { FFmpeg } = FFmpegWASM;
       ffmpeg = new FFmpeg();
       
-      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd';
+      // Use local files to avoid cross-origin worker issues
       await ffmpeg.load({
-        coreURL: `${baseURL}/ffmpeg-core.js`,
-        wasmURL: `${baseURL}/ffmpeg-core.wasm`,
+        coreURL: '/ffmpeg/ffmpeg-core.js',
+        wasmURL: '/ffmpeg/ffmpeg-core.wasm',
+        workerURL: '/ffmpeg/814.ffmpeg.js',
       });
       
       return ffmpeg;

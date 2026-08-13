@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "AI-powered video editor with natural language commands",
   "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.10",
+    "@ffmpeg/util": "^0.12.1",
     "axios": "^1.6.2"
   }
 }
