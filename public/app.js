@@ -1,3 +1,5 @@
+import { buildArgs, num, clamp, even, atempoChain } from './operations.js';
+
 // State
 let currentVideoBlob = null;
 let currentVideoUrl = null;
@@ -32,7 +34,17 @@ const landingSaveKey = document.getElementById('landing-save-key');
 // Initialize FFmpeg
 let ffmpegInitPromise = null;
 let ffmpegIsMT = false;
-let videoHasAudioCache = null;
+let videoMetaCache = null;      // { duration, width, height, hasAudio } per clip
+let lastWrittenFiles = [];      // virtual-FS cleanup between runs
+let opsSinceLoad = 0;           // recycle the wasm heap periodically
+const history = [];             // previous blobs, for undo
+
+/** Shared progress handler (re-attached when the instance is recreated). */
+function onProgress({ progress }) {
+  const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
+  if (progressFill) progressFill.style.width = pct + '%';
+  if (processingText && pct > 0) processingText.textContent = `Processing... ${pct}%`;
+}
 
 /**
  * The multithreaded core needs SharedArrayBuffer, which browsers only expose in
@@ -53,6 +65,27 @@ function threadCount() {
   return Math.max(1, Math.min(8, n - 1));
 }
 
+/** Reject if a promise hasn't settled in `ms` — nothing may hang forever. */
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    }),
+  ]);
+}
+
+/** Throw the whole instance away — used after an abort so the next run is clean. */
+function resetFFmpeg() {
+  try { ffmpeg && ffmpeg.terminate && ffmpeg.terminate(); } catch {}
+  ffmpeg = null;
+  ffmpegInitPromise = null;
+  ffmpegIsMT = false;
+  opsSinceLoad = 0;
+  lastWrittenFiles = [];
+}
+
 async function initFFmpeg() {
   if (ffmpeg && ffmpeg.loaded) return ffmpeg;
   
@@ -68,11 +101,7 @@ async function initFFmpeg() {
       ffmpeg.on('log', ({ message }) => console.log('[ffmpeg]', message));
 
       // Drive the real progress bar instead of leaving it stuck at 0%
-      ffmpeg.on('progress', ({ progress }) => {
-        const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
-        if (progressFill) progressFill.style.width = pct + '%';
-        if (processingText && pct > 0) processingText.textContent = `Processing video... ${pct}%`;
-      });
+      ffmpeg.on('progress', onProgress);
 
       // Do NOT pass `classWorkerURL`. Two traps in @ffmpeg/ffmpeg 0.12.x:
       //
@@ -88,26 +117,19 @@ async function initFFmpeg() {
       //
       // `workerURL` is a DIFFERENT option, consumed inside the worker by the core
       // itself for its pthread pool. The multithreaded core requires it.
-      const mt = isMultithreadSupported();
+      // The multithreaded core (@ffmpeg/core-mt) was tried here and REVERTED.
+      // Under real use it throws "function signature mismatch" mid-encode and
+      // takes the whole tab down with it — verified in an automated browser run
+      // where MT crashed on 4 of 5 commands while the single-threaded core
+      // passed all 5. Threads are not worth a crash; the speed now comes from
+      // stream-copy fast paths instead (see operations.js).
+      await withTimeout(ffmpeg.load({
+        coreURL: '/ffmpeg/st/ffmpeg-core.js',
+        wasmURL: '/ffmpeg/st/ffmpeg-core.wasm',
+      }), 60000, 'FFmpeg load');
 
-      if (mt) {
-        // ~4-8x faster: real pthreads across CPU cores. Requires SharedArrayBuffer,
-        // which requires the COOP/COEP headers set in vercel.json.
-        await ffmpeg.load({
-          coreURL: '/ffmpeg/mt/ffmpeg-core.js',
-          wasmURL: '/ffmpeg/mt/ffmpeg-core.wasm',
-          workerURL: '/ffmpeg/mt/ffmpeg-core.worker.js',
-        });
-      } else {
-        // Fallback for browsers without crossOriginIsolated (e.g. older Safari)
-        await ffmpeg.load({
-          coreURL: '/ffmpeg/st/ffmpeg-core.js',
-          wasmURL: '/ffmpeg/st/ffmpeg-core.wasm',
-        });
-      }
-
-      ffmpegIsMT = mt;
-      console.log(`[ffmpeg] loaded ${mt ? 'MULTI-threaded' : 'single-threaded'} core (${navigator.hardwareConcurrency || '?'} cores)`);
+      ffmpegIsMT = false;
+      console.log(`[ffmpeg] loaded single-threaded core (${navigator.hardwareConcurrency || '?'} cores reported)`);
 
       return ffmpeg;
     } catch (err) {
@@ -178,7 +200,7 @@ async function handleVideoFile(file) {
   initFFmpeg().catch(() => {});
 
   // Cache the audio-track check so we don't redo it on every single edit
-  videoHasAudioCache = null;
+  videoMetaCache = null;
 }
 
 function switchToEditor() {
@@ -267,7 +289,9 @@ async function sendMessage() {
       body: JSON.stringify({
         command: text,
         apiKey,
-        model: localStorage.getItem('model') || 'llama-3.3-70b-versatile'
+        model: localStorage.getItem('model') || 'llama-3.3-70b-versatile',
+        // Clip context makes the parser far more accurate (e.g. "last 5 seconds")
+        meta: await probeVideo(currentVideoBlob).catch(() => ({})),
       })
     });
 
@@ -299,218 +323,234 @@ async function sendMessage() {
   }
 }
 
-async function processVideo(operation) {
-  console.log('Processing operation:', operation);
+/**
+ * Probe the clip once: duration, dimensions, audio presence.
+ * Cached per uploaded file so we never re-probe on every edit.
+ */
+function probeVideo(blob) {
+  if (videoMetaCache) return Promise.resolve(videoMetaCache);
+  return new Promise((resolve) => {
+    const fallback = { duration: 0, width: 0, height: 0, hasAudio: true };
+    let settled = false;
+    const finish = (meta) => {
+      if (settled) return;
+      settled = true;
+      videoMetaCache = meta;
+      resolve(meta);
+    };
+    try {
+      const el = document.createElement('video');
+      el.preload = 'metadata';
+      el.muted = true;
+      const url = URL.createObjectURL(blob);
+      const timer = setTimeout(() => { URL.revokeObjectURL(url); finish(fallback); }, 5000);
+      el.onloadedmetadata = async () => {
+        clearTimeout(timer);
+        const meta = {
+          duration: Number.isFinite(el.duration) ? el.duration : 0,
+          width: el.videoWidth || 0,
+          height: el.videoHeight || 0,
+          hasAudio: Boolean(
+            el.mozHasAudio ||
+            el.webkitAudioDecodedByteCount > 0 ||
+            (el.audioTracks && el.audioTracks.length > 0)
+          ),
+        };
+        // Chrome defines webkitAudioDecodedByteCount but leaves it at 0 until
+        // frames are actually decoded, so metadata alone makes EVERY clip look
+        // silent (measured: 0 for both a silent and an audio clip). A brief
+        // muted play decodes a few frames and separates them (0 vs 7058).
+        if (!meta.hasAudio && typeof el.webkitAudioDecodedByteCount === 'number') {
+          try {
+            el.muted = true;
+            await el.play();
+            await new Promise((r) => setTimeout(r, 250));
+            el.pause();
+            meta.hasAudio = el.webkitAudioDecodedByteCount > 0;
+          } catch {
+            // Autoplay refused: assume audio so we never wrongly refuse a
+            // volume/extract request. FFmpeg reports it properly either way.
+            meta.hasAudio = true;
+          }
+        }
+        URL.revokeObjectURL(url);
+        finish(meta);
+      };
+      el.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(url); finish(fallback); };
+      el.src = url;
+    } catch {
+      finish(fallback);
+    }
+  });
+}
 
-  // Set expectations up front. FFmpeg.wasm is far slower than native, so a long
-  // clip can take minutes — say so rather than letting it look frozen.
-  const dur = videoPlayer.duration;
-  const lossless = operation.operation === 'trim_video' ||
-                   operation.operation === 'mute_audio' ||
-                   operation.operation === 'adjust_volume';
-  if (Number.isFinite(dur) && dur > 60 && !lossless) {
-    addMessage('ai', `Heads up: this clip is ${Math.round(dur / 60)} min. Re-encoding in the browser is slow — expect a few minutes. Short clips are much quicker.`);
+async function processVideo(operation) {
+  const meta = await probeVideo(currentVideoBlob);
+
+  const ctx = {
+    duration: meta.duration,
+    width: meta.width,
+    height: meta.height,
+    hasAudio: meta.hasAudio,
+    threads: threadCount(),
+    isMT: ffmpegIsMT,
+    inputName: 'input.mp4',
+  };
+
+  // Validate and build BEFORE touching FFmpeg, so bad AI output costs nothing
+  const plan = buildArgs(operation.operation, operation.parameters, ctx);
+  if (plan.error) {
+    addMessage('ai', plan.error);
+    return;
+  }
+
+  // Set expectations. WASM is far slower than native ffmpeg.
+  const heavy = !plan.args.includes('copy');
+  if (meta.duration > 90 && heavy) {
+    addMessage('ai', `This clip is ${Math.round(meta.duration / 60)} min, so re-encoding in the browser will take a while. Trimming first is much faster.`);
+  }
+
+  const ffmpegInstance = await withTimeout(initFFmpeg(), 90000, 'FFmpeg startup');
+  if (!ffmpegInstance || !ffmpegInstance.loaded) {
+    throw new Error('FFmpeg failed to start. Reload the page and try again.');
   }
 
   const t0 = performance.now();
-  
-  // Ensure FFmpeg is initialized and loaded
-  const ffmpegInstance = await initFFmpeg();
-  
-  // Double-check it's actually loaded
-  if (!ffmpegInstance || !ffmpegInstance.loaded) {
-    throw new Error('FFmpeg is not ready. Please try again.');
-  }
-  
+  let aborted = false;
+
   try {
-    // Write input file
-    const inputName = 'input.mp4';
-    const outputName = 'output.mp4';
-    
-    const fileData = await currentVideoBlob.arrayBuffer();
-    await ffmpegInstance.writeFile(inputName, new Uint8Array(fileData));
+    // Clean any leftovers from a previous run
+    for (const f of lastWrittenFiles) {
+      try { await ffmpegInstance.deleteFile(f); } catch {}
+    }
+    lastWrittenFiles = [];
 
-    // Does this file even have an audio track? Applying -filter:a to a silent
-    // video makes FFmpeg abort with "Stream specifier ':a' matches no streams".
-    const hasAudio = await videoHasAudio(currentVideoBlob);
+    // writeFile TRANSFERS the buffer to the worker, which DETACHES it here.
+    // Reusing a detached buffer on the next command throws
+    // "An ArrayBuffer is detached and could not be cloned" — that was the real
+    // cause of the second command hanging forever. Re-read the blob each run so
+    // the worker always gets a fresh, owned buffer.
+    const fileData = new Uint8Array(await currentVideoBlob.arrayBuffer());
+    await ffmpegInstance.writeFile('input.mp4', fileData);
+    lastWrittenFiles.push('input.mp4');
 
-    // Build FFmpeg command based on operation.
-    // Every arg MUST be a string — ffmpeg.wasm passes argv straight through and
-    // a raw JS number throws "args must be an array of strings".
-    const args = ['-i', inputName];
-    const p = operation.parameters || {};
-
-    switch (operation.operation) {
-      case 'trim_video':
-        args.push('-ss', String(num(p.start, 0)));
-        args.push('-t', String(num(p.duration, 10)));
-        break;
-
-      case 'resize_video':
-        // Force even dimensions — H.264 (yuv420p) rejects odd width/height
-        args.push('-vf', `scale=${even(num(p.width, 1280))}:${even(num(p.height, 720))}`);
-        break;
-
-      case 'crop_video': {
-        const width  = even(num(p.width, 1280));
-        const height = even(num(p.height, 720));
-        const x = num(p.x, 0), y = num(p.y, 0);
-        args.push('-vf', `crop=${width}:${height}:${x}:${y}`);
-        break;
-      }
-
-      case 'adjust_speed': {
-        const speed = clamp(num(p.speed, 1), 0.25, 8);
-        args.push('-filter:v', `setpts=${(1 / speed).toFixed(6)}*PTS`);
-        if (hasAudio) args.push('-filter:a', atempoChain(speed));
-        else args.push('-an');
-        break;
-      }
-
-      case 'slow_motion': {
-        // factor 2 = half speed
-        const factor = clamp(num(p.factor, 2), 1, 8);
-        const speed = 1 / factor;
-        args.push('-filter:v', `setpts=${factor.toFixed(6)}*PTS`);
-        // atempo needs a literal float, not the expression "1/2"
-        if (hasAudio) args.push('-filter:a', atempoChain(speed));
-        else args.push('-an');
-        break;
-      }
-
-      case 'speed_up': {
-        const factor = clamp(num(p.factor, 2), 1, 8);
-        args.push('-filter:v', `setpts=${(1 / factor).toFixed(6)}*PTS`);
-        if (hasAudio) args.push('-filter:a', atempoChain(factor));
-        else args.push('-an');
-        break;
-      }
-
-      case 'mute_audio':
-        args.push('-an');
-        break;
-
-      case 'adjust_volume':
-        if (hasAudio) args.push('-af', `volume=${num(p.level, 1)}`);
-        break;
-        
-      case 'color_grade': {
-        const grade = String(p.grade || 'warm').toLowerCase();
-        const gradeFilters = {
-          warm: 'colorbalance=rs=0.3:gs=0:bs=-0.3',
-          cool: 'colorbalance=rs=-0.3:gs=0:bs=0.3',
-          vintage: 'curves=preset=vintage',
-          // "cinematic" = teal/orange push + slight contrast, not just "lighter"
-          cinematic: 'colorbalance=rs=0.15:bs=-0.15:rm=0.05:bm=-0.05,eq=contrast=1.15:saturation=1.1'
-        };
-        args.push('-vf', gradeFilters[grade] || gradeFilters.warm);
-        break;
-      }
-
-      case 'add_effect':
-      case 'add_filter': {
-        const effect = String(p.effect || p.filter || 'blur').toLowerCase();
-        const effectFilters = {
-          blur: 'boxblur=5:1',
-          sharpen: 'unsharp=5:5:1.5',
-          grayscale: 'hue=s=0',
-          sepia: 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
-          // "curves=vintage" is invalid syntax; the preset= form is required
-          vintage: 'curves=preset=vintage',
-          emboss: 'convolution=-2 -1 0:-1 1 1:0 1 2',
-          edge: 'edgedetect=low=0.1:high=0.4',
-          brightness: `eq=brightness=${clamp(num(p.intensity, 50) / 100 - 0.5, -1, 1).toFixed(3)}`,
-          contrast: `eq=contrast=${clamp(num(p.intensity, 50) / 50, 0, 3).toFixed(3)}`,
-          saturation: `eq=saturation=${clamp(num(p.intensity, 50) / 50, 0, 3).toFixed(3)}`
-        };
-        args.push('-vf', effectFilters[effect] || effectFilters.blur);
-        break;
-      }
-
-      default:
-        throw new Error(`Unknown operation: ${operation.operation}`);
+    // The wasm core has no fontconfig, so drawtext must be handed an explicit
+    // fontfile or it writes a zero-byte output. Load one on demand.
+    if (plan.needsFont) {
+      const fontRes = await fetch('/font.ttf');
+      if (!fontRes.ok) throw new Error('Could not load the text font.');
+      await ffmpegInstance.writeFile('font.ttf', new Uint8Array(await fontRes.arrayBuffer()));
+      lastWrittenFiles.push('font.ttf');
     }
 
-    // ── Encoder settings ─────────────────────────────────────────────────────
-    // Trimming touches no pixels, so stream-copy instead of re-encoding. This is
-    // the single biggest speedup available: seconds-long jobs become instant.
-    const isLosslessTrim = operation.operation === 'trim_video';
-    // Audio-only operations leave every pixel untouched, so copy the video
-    // stream verbatim rather than burning CPU re-encoding it.
-    const audioOnlyOp = operation.operation === 'mute_audio' || operation.operation === 'adjust_volume';
+    console.log('FFmpeg command:', plan.args.join(' '));
 
-    if (isLosslessTrim) {
-      args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero');
-    } else if (audioOnlyOp) {
-      args.push('-c:v', 'copy');
-      if (!args.includes('-an')) args.push('-c:a', 'aac');
-    } else {
-      args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency');
-      // CRF 28 is visually close to the default 23 but encodes markedly faster
-      // and produces a much smaller file.
-      args.push('-crf', '28');
-      args.push('-pix_fmt', 'yuv420p');
-      // Explicit thread count; without it the MT core often runs single-threaded
-      if (ffmpegIsMT) args.push('-threads', String(threadCount()));
-      // Only re-encode audio when a filter actually altered it
-      const audioFiltered = args.includes('-filter:a') || args.includes('-af');
-      if (hasAudio && !args.includes('-an')) {
-        args.push('-c:a', audioFiltered ? 'aac' : 'copy');
-      }
+    // Scale the timeout to the clip: never infinite, never unfairly short.
+    const budgetMs = Math.min(
+      15 * 60 * 1000,
+      Math.max(60000, (meta.duration || 10) * (heavy ? 12000 : 1500))
+    );
+    await withTimeout(ffmpegInstance.exec(plan.args), budgetMs, 'Processing');
+
+    const data = await ffmpegInstance.readFile(plan.outputName);
+    lastWrittenFiles.push(plan.outputName);
+
+    if (!data || data.byteLength === 0) {
+      throw new Error('FFmpeg produced an empty file — the command may not suit this clip.');
     }
 
-    args.push('-movflags', '+faststart');
-    args.push(outputName);
-
-    console.log('FFmpeg command:', args);
-    // Run FFmpeg
-    await ffmpegInstance.exec(args);
-
-    // Read output
-    const data = await ffmpegInstance.readFile(outputName);
-    const blob = new Blob([data.buffer], { type: 'video/mp4' });
-    
-    // Update video
-    if (currentVideoUrl) {
-      URL.revokeObjectURL(currentVideoUrl);
-    }
-    currentVideoBlob = blob;
-    currentVideoUrl = URL.createObjectURL(blob);
-    videoPlayer.src = currentVideoUrl;
-    
+    const blob = new Blob([data.buffer], { type: plan.mime });
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     const mb = (blob.size / 1048576).toFixed(1);
-    addMessage('ai', `✓ Done in ${secs}s · ${mb} MB${ffmpegIsMT ? '' : ' (single-threaded mode)'}`);
 
+    if (plan.kind === 'video') {
+      if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
+      pushHistory(currentVideoBlob);
+      currentVideoBlob = blob;
+      currentVideoUrl = URL.createObjectURL(blob);
+      videoPlayer.src = currentVideoUrl;
+      videoMetaCache = null;               // dimensions/duration may have changed
+      addMessage('ai', `Done in ${secs}s · ${mb} MB${ffmpegIsMT ? '' : ' · single-threaded'}`);
+      updateUndoButton();
+    } else {
+      // Image or audio side-output: offer it as a download, keep the video as-is
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${projectName.textContent || 'cutflow'}.${plan.ext}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      addMessage('ai', `${plan.label} ready — downloaded (${mb} MB, ${secs}s).`);
+    }
   } catch (err) {
+    aborted = true;
+    const msg = String(err && err.message || err);
     console.error('FFmpeg error:', err);
-    console.error('Error type:', typeof err);
-    console.error('Error keys:', Object.keys(err || {}));
-    const errorMsg = err?.message || err?.toString() || String(err) || 'Unknown error';
-    throw new Error('Video processing failed: ' + errorMsg);
+    if (/timed out/i.test(msg)) {
+      throw new Error(`${msg}. Try a shorter clip, or trim it first.`);
+    }
+    if (/abort|memory|OOM|RuntimeError/i.test(msg)) {
+      throw new Error('Ran out of memory on this clip. Try a shorter or smaller video.');
+    }
+    throw new Error(msg.replace(/^Error:\s*/, ''));
+  } finally {
+    // The WASM core frequently reports Aborted() after a run. Reusing a crashed
+    // instance is what made the SECOND command hang forever, so bin it and let
+    // the next command start a fresh one.
+    if (aborted) {
+      resetFFmpeg();
+    } else {
+      // Delete EVERYTHING written this run, not just input/output. The wasm
+      // heap never shrinks, so leaked files (font.ttf, palettes, side outputs)
+      // accumulate across commands until the tab is OOM-killed — that is what
+      // crashed the page after ~20 sequential operations.
+      for (const f of new Set([...lastWrittenFiles, plan.outputName])) {
+        try { await ffmpegInstance.deleteFile(f); } catch {}
+      }
+      lastWrittenFiles = [];
+      opsSinceLoad++;
+      // Even with clean deletes the heap creeps upward. Recycle the instance
+      // periodically; a reload costs ~1s versus losing the user's session.
+      if (opsSinceLoad >= 12) {
+        console.log('[ffmpeg] recycling instance after', opsSinceLoad, 'operations');
+        resetFFmpeg();
+      }
+    }
   }
 }
 
 function addMessage(sender, text) {
   const msgDiv = document.createElement('div');
-  msgDiv.className = 'message';
-  
+  msgDiv.className = 'message' + (sender === 'ai' ? ' ai-message' : '');
+
   const avatar = document.createElement('div');
   avatar.className = 'message-avatar';
   avatar.textContent = sender === 'ai' ? 'AI' : 'You';
-  
+
   const content = document.createElement('div');
   content.className = 'message-content';
-  
+
   const p = document.createElement('p');
   p.textContent = text;
   content.appendChild(p);
-  
+
   msgDiv.appendChild(avatar);
   msgDiv.appendChild(content);
-  
+
   chatMessages.appendChild(msgDiv);
   chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function pushHistory(blob) {
+  history.push(blob);
+  if (history.length > 10) history.shift();   // cap memory
+}
+
+function updateUndoButton() {
+  const btn = document.getElementById('undo-btn');
+  if (btn) btn.disabled = history.length === 0;
 }
 
 // Settings modal
@@ -540,6 +580,35 @@ document.getElementById('save-settings').addEventListener('click', () => {
   }
 });
 
+// Undo — restore the previous version of the clip
+const undoBtn = document.getElementById('undo-btn');
+if (undoBtn) {
+  undoBtn.addEventListener('click', () => {
+    if (!history.length || isProcessing) return;
+    const prev = history.pop();
+    if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
+    currentVideoBlob = prev;
+    currentVideoUrl = URL.createObjectURL(prev);
+    videoPlayer.src = currentVideoUrl;
+    videoMetaCache = null;
+    addMessage('ai', 'Reverted to the previous version.');
+    updateUndoButton();
+  });
+}
+
+// Cancel — kill a running job instead of forcing a page reload
+const cancelBtn = document.getElementById('cancel-btn');
+if (cancelBtn) {
+  cancelBtn.addEventListener('click', () => {
+    if (!isProcessing) return;
+    addMessage('ai', 'Cancelled.');
+    resetFFmpeg();          // terminates the worker mid-exec
+    hideProcessing();
+    isProcessing = false;
+    sendBtn.disabled = false;
+  });
+}
+
 // Export
 document.getElementById('export-btn').addEventListener('click', () => {
   if (!currentVideoBlob) {
@@ -561,70 +630,6 @@ document.getElementById('export-btn').addEventListener('click', () => {
 // Helpers
 
 // Coerce whatever the LLM returned into a usable number
-function num(v, fallback) {
-  const n = typeof v === 'number' ? v : parseFloat(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function clamp(n, lo, hi) {
-  return Math.min(hi, Math.max(lo, n));
-}
-
-// H.264 requires even dimensions
-function even(n) {
-  const v = Math.round(n);
-  return v % 2 === 0 ? v : v + 1;
-}
-
-/**
- * FFmpeg's atempo filter only accepts 0.5–2.0 per instance, and only a literal
- * float (never an expression like "1/2"). Anything outside that range has to be
- * chained: 4x becomes atempo=2.0,atempo=2.0.
- */
-function atempoChain(speed) {
-  let s = clamp(speed, 0.25, 8);
-  const parts = [];
-  while (s > 2.0) { parts.push('atempo=2.0'); s /= 2; }
-  while (s < 0.5) { parts.push('atempo=0.5'); s *= 2; }
-  parts.push(`atempo=${s.toFixed(6)}`);
-  return parts.join(',');
-}
-
-/**
- * Detect an audio track before applying any -filter:a / -af, otherwise FFmpeg
- * aborts with "Stream specifier ':a' matches no streams".
- */
-function videoHasAudio(blob) {
-  // Probing spins up a <video> element and waits on metadata; cache per clip
-  if (videoHasAudioCache !== null) return Promise.resolve(videoHasAudioCache);
-  return new Promise((resolve) => {
-    try {
-      const el = document.createElement('video');
-      el.preload = 'metadata';
-      const url = URL.createObjectURL(blob);
-      const done = (result) => {
-        URL.revokeObjectURL(url);
-        el.removeAttribute('src');
-        videoHasAudioCache = result;
-        resolve(result);
-      };
-      const timer = setTimeout(() => done(true), 3000); // assume audio if unknown
-      el.onloadedmetadata = () => {
-        clearTimeout(timer);
-        const tracks =
-          el.mozHasAudio ||
-          Boolean(el.webkitAudioDecodedByteCount) ||
-          Boolean(el.audioTracks && el.audioTracks.length);
-        done(Boolean(tracks));
-      };
-      el.onerror = () => { clearTimeout(timer); done(true); };
-      el.src = url;
-    } catch {
-      resolve(true);
-    }
-  });
-}
-
 function formatTime(seconds) {
   if (isNaN(seconds)) return '0:00';
   const mins = Math.floor(seconds / 60);
