@@ -42,14 +42,26 @@ async function initFFmpeg() {
     try {
       const { FFmpeg } = FFmpegWASM;
       ffmpeg = new FFmpeg();
-      
-      // Use local files to avoid cross-origin worker issues
+
+      // Surface FFmpeg's own logs so failures are diagnosable in the console
+      ffmpeg.on('log', ({ message }) => console.log('[ffmpeg]', message));
+
+      // Drive the real progress bar instead of leaving it stuck at 0%
+      ffmpeg.on('progress', ({ progress }) => {
+        const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
+        if (progressFill) progressFill.style.width = pct + '%';
+        if (processingText && pct > 0) processingText.textContent = `Processing video... ${pct}%`;
+      });
+
+      // NOTE: the option is `classWorkerURL`, NOT `workerURL`.
+      // `workerURL` is silently ignored by @ffmpeg/ffmpeg 0.12.x, so the library
+      // fell back to its bundled worker path and threw a cross-origin error.
       await ffmpeg.load({
         coreURL: '/ffmpeg/ffmpeg-core.js',
         wasmURL: '/ffmpeg/ffmpeg-core.wasm',
-        workerURL: '/ffmpeg/814.ffmpeg.js',
+        classWorkerURL: '/ffmpeg/814.ffmpeg.js',
       });
-      
+
       return ffmpeg;
     } catch (err) {
       ffmpegInitPromise = null; // Reset on failure so we can retry
@@ -204,11 +216,15 @@ async function sendMessage() {
       })
     });
 
-    const aiData = await aiResponse.json();
-    console.log('AI response:', aiData);
+    let aiData = {};
+    try {
+      aiData = await aiResponse.json();
+    } catch {
+      throw new Error(`Server returned an invalid response (HTTP ${aiResponse.status})`);
+    }
 
-    if (!aiData.success) {
-      throw new Error(aiData.error || 'AI command failed');
+    if (!aiResponse.ok || !aiData.success) {
+      throw new Error(aiData.error || `AI request failed (HTTP ${aiResponse.status})`);
     }
 
     addMessage('ai', aiData.result.response || `Applying: ${aiData.result.description}`);
@@ -247,81 +263,111 @@ async function processVideo(operation) {
     const fileData = await currentVideoBlob.arrayBuffer();
     await ffmpegInstance.writeFile(inputName, new Uint8Array(fileData));
 
-    // Build FFmpeg command based on operation
+    // Does this file even have an audio track? Applying -filter:a to a silent
+    // video makes FFmpeg abort with "Stream specifier ':a' matches no streams".
+    const hasAudio = await videoHasAudio(currentVideoBlob);
+
+    // Build FFmpeg command based on operation.
+    // Every arg MUST be a string — ffmpeg.wasm passes argv straight through and
+    // a raw JS number throws "args must be an array of strings".
     const args = ['-i', inputName];
-    
+    const p = operation.parameters || {};
+
     switch (operation.operation) {
       case 'trim_video':
-        args.push('-ss', operation.parameters.start || 0);
-        args.push('-t', operation.parameters.duration || 10);
+        args.push('-ss', String(num(p.start, 0)));
+        args.push('-t', String(num(p.duration, 10)));
         break;
-        
+
       case 'resize_video':
-        args.push('-vf', `scale=${operation.parameters.width}:${operation.parameters.height}`);
+        // Force even dimensions — H.264 (yuv420p) rejects odd width/height
+        args.push('-vf', `scale=${even(num(p.width, 1280))}:${even(num(p.height, 720))}`);
         break;
-        
-      case 'crop_video':
-        const { width, height, x = 0, y = 0 } = operation.parameters;
+
+      case 'crop_video': {
+        const width  = even(num(p.width, 1280));
+        const height = even(num(p.height, 720));
+        const x = num(p.x, 0), y = num(p.y, 0);
         args.push('-vf', `crop=${width}:${height}:${x}:${y}`);
         break;
-        
-      case 'adjust_speed':
-        const speed = operation.parameters.speed || 1;
-        args.push('-filter:v', `setpts=${1/speed}*PTS`);
-        args.push('-filter:a', `atempo=${speed}`);
+      }
+
+      case 'adjust_speed': {
+        const speed = clamp(num(p.speed, 1), 0.25, 8);
+        args.push('-filter:v', `setpts=${(1 / speed).toFixed(6)}*PTS`);
+        if (hasAudio) args.push('-filter:a', atempoChain(speed));
+        else args.push('-an');
         break;
-        
-      case 'slow_motion':
-        const factor = operation.parameters.factor || 2;
-        args.push('-filter:v', `setpts=${factor}*PTS`);
-        args.push('-filter:a', `atempo=1/${factor}`);
+      }
+
+      case 'slow_motion': {
+        // factor 2 = half speed
+        const factor = clamp(num(p.factor, 2), 1, 8);
+        const speed = 1 / factor;
+        args.push('-filter:v', `setpts=${factor.toFixed(6)}*PTS`);
+        // atempo needs a literal float, not the expression "1/2"
+        if (hasAudio) args.push('-filter:a', atempoChain(speed));
+        else args.push('-an');
         break;
-        
-      case 'speed_up':
-        const speedUp = operation.parameters.factor || 2;
-        args.push('-filter:v', `setpts=1/${speedUp}*PTS`);
-        args.push('-filter:a', `atempo=${speedUp}`);
+      }
+
+      case 'speed_up': {
+        const factor = clamp(num(p.factor, 2), 1, 8);
+        args.push('-filter:v', `setpts=${(1 / factor).toFixed(6)}*PTS`);
+        if (hasAudio) args.push('-filter:a', atempoChain(factor));
+        else args.push('-an');
         break;
-        
+      }
+
       case 'mute_audio':
         args.push('-an');
         break;
-        
+
       case 'adjust_volume':
-        const level = operation.parameters.level || 1;
-        args.push('-af', `volume=${level}`);
+        if (hasAudio) args.push('-af', `volume=${num(p.level, 1)}`);
         break;
         
-      case 'color_grade':
-        const grade = operation.parameters.grade || 'warm';
+      case 'color_grade': {
+        const grade = String(p.grade || 'warm').toLowerCase();
         const gradeFilters = {
           warm: 'colorbalance=rs=0.3:gs=0:bs=-0.3',
           cool: 'colorbalance=rs=-0.3:gs=0:bs=0.3',
-          vintage: 'curves=vintage',
-          cinematic: 'curves=preset=lighter'
+          vintage: 'curves=preset=vintage',
+          // "cinematic" = teal/orange push + slight contrast, not just "lighter"
+          cinematic: 'colorbalance=rs=0.15:bs=-0.15:rm=0.05:bm=-0.05,eq=contrast=1.15:saturation=1.1'
         };
         args.push('-vf', gradeFilters[grade] || gradeFilters.warm);
         break;
-        
+      }
+
       case 'add_effect':
-      case 'add_filter':
-        const effect = operation.parameters.effect || operation.parameters.filter || 'blur';
+      case 'add_filter': {
+        const effect = String(p.effect || p.filter || 'blur').toLowerCase();
         const effectFilters = {
           blur: 'boxblur=5:1',
           sharpen: 'unsharp=5:5:1.5',
           grayscale: 'hue=s=0',
           sepia: 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
-          vintage: 'curves=vintage',
-          emboss: 'convolution=-2 -1 0 -1 1 1 0 1 2',
-          edge: 'edgedetect=low=0.1:high=0.4'
+          // "curves=vintage" is invalid syntax; the preset= form is required
+          vintage: 'curves=preset=vintage',
+          emboss: 'convolution=-2 -1 0:-1 1 1:0 1 2',
+          edge: 'edgedetect=low=0.1:high=0.4',
+          brightness: `eq=brightness=${clamp(num(p.intensity, 50) / 100 - 0.5, -1, 1).toFixed(3)}`,
+          contrast: `eq=contrast=${clamp(num(p.intensity, 50) / 50, 0, 3).toFixed(3)}`,
+          saturation: `eq=saturation=${clamp(num(p.intensity, 50) / 50, 0, 3).toFixed(3)}`
         };
         args.push('-vf', effectFilters[effect] || effectFilters.blur);
         break;
-        
+      }
+
       default:
         throw new Error(`Unknown operation: ${operation.operation}`);
     }
-    
+
+    // Re-encode to a browser-playable MP4. Without yuv420p + faststart the
+    // output often plays audio-only or not at all in Chrome/Safari.
+    args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p');
+    args.push('-movflags', '+faststart');
     args.push(outputName);
 
     console.log('FFmpeg command:', args);
@@ -402,15 +448,86 @@ document.getElementById('save-settings').addEventListener('click', () => {
 
 // Export
 document.getElementById('export-btn').addEventListener('click', () => {
-  if (!currentVideoBlob) return;
-  
+  if (!currentVideoBlob) {
+    addMessage('ai', 'Upload a video first.');
+    return;
+  }
+
+  // Leaking the object URL kept the whole blob in memory; revoke it after use
+  const url = URL.createObjectURL(currentVideoBlob);
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(currentVideoBlob);
-  a.download = `${projectName.textContent}_edited.mp4`;
+  a.href = url;
+  a.download = `${projectName.textContent || 'video'}_edited.mp4`;
+  document.body.appendChild(a);
   a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
 });
 
 // Helpers
+
+// Coerce whatever the LLM returned into a usable number
+function num(v, fallback) {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function clamp(n, lo, hi) {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+// H.264 requires even dimensions
+function even(n) {
+  const v = Math.round(n);
+  return v % 2 === 0 ? v : v + 1;
+}
+
+/**
+ * FFmpeg's atempo filter only accepts 0.5–2.0 per instance, and only a literal
+ * float (never an expression like "1/2"). Anything outside that range has to be
+ * chained: 4x becomes atempo=2.0,atempo=2.0.
+ */
+function atempoChain(speed) {
+  let s = clamp(speed, 0.25, 8);
+  const parts = [];
+  while (s > 2.0) { parts.push('atempo=2.0'); s /= 2; }
+  while (s < 0.5) { parts.push('atempo=0.5'); s *= 2; }
+  parts.push(`atempo=${s.toFixed(6)}`);
+  return parts.join(',');
+}
+
+/**
+ * Detect an audio track before applying any -filter:a / -af, otherwise FFmpeg
+ * aborts with "Stream specifier ':a' matches no streams".
+ */
+function videoHasAudio(blob) {
+  return new Promise((resolve) => {
+    try {
+      const el = document.createElement('video');
+      el.preload = 'metadata';
+      const url = URL.createObjectURL(blob);
+      const done = (result) => {
+        URL.revokeObjectURL(url);
+        el.removeAttribute('src');
+        resolve(result);
+      };
+      const timer = setTimeout(() => done(true), 3000); // assume audio if unknown
+      el.onloadedmetadata = () => {
+        clearTimeout(timer);
+        const tracks =
+          el.mozHasAudio ||
+          Boolean(el.webkitAudioDecodedByteCount) ||
+          Boolean(el.audioTracks && el.audioTracks.length);
+        done(Boolean(tracks));
+      };
+      el.onerror = () => { clearTimeout(timer); done(true); };
+      el.src = url;
+    } catch {
+      resolve(true);
+    }
+  });
+}
+
 function formatTime(seconds) {
   if (isNaN(seconds)) return '0:00';
   const mins = Math.floor(seconds / 60);
