@@ -317,8 +317,10 @@ export const OPERATIONS = {
       if ((ctx.duration || 0) > 15) {
         return { noop: 'GIF export is limited to 15 seconds — trim it first.' };
       }
-      const fps = clamp(num(p.fps, 12), 4, 25);
-      const w = even(clamp(num(p.width, 480), 64, 800));
+      // 480px @ 12fps produced a 6.1 MB GIF from a 6s clip — too big to send
+      // anywhere. 360px @ 10fps keeps it shareable while still looking fine.
+      const fps = clamp(num(p.fps, 10), 4, 20);
+      const w = even(clamp(num(p.width, 360), 64, 640));
       return { toGif: true, gifFps: fps, gifWidth: w };
     },
   },
@@ -328,6 +330,207 @@ export const OPERATIONS = {
     build(p, ctx) {
       const at = clamp(num(p.time, num(p.at, 0)), 0, Math.max(0, (ctx.duration || 1) - 0.05));
       return { thumbnail: true, at };
+    },
+  },
+
+  /* ── added: framing ─────────────────────────────────────────────────────── */
+
+  pad_video: {
+    label: 'Fit with bars',
+    build(p, ctx) {
+      const ar = ASPECTS[String(p.aspect)] || 9 / 16;
+      // Cap the LONG edge, not the width: sizing a 9:16 canvas off a landscape
+      // width produced 1280x2276 (11 MB). Capping the long edge gives the
+      // conventional 720x1280 instead.
+      let tw, th;
+      if (ar < 1) { th = MAX_EDIT_WIDTH; tw = Math.round(MAX_EDIT_WIDTH * ar); }
+      else { tw = MAX_EDIT_WIDTH; th = Math.round(MAX_EDIT_WIDTH / ar); }
+      const colour = /^[a-z]+$|^#[0-9a-f]{3,6}$/i.test(String(p.color || '')) ? p.color : 'black';
+      return {
+        ownGeometry: true,
+        filters: [
+          `scale=${even(tw)}:${even(th)}:force_original_aspect_ratio=decrease`,
+          `pad=${even(tw)}:${even(th)}:(ow-iw)/2:(oh-ih)/2:${colour}`,
+          'setsar=1',
+        ],
+      };
+    },
+  },
+
+  blur_background: {
+    label: 'Blurred background',
+    build(p, ctx) {
+      // The look every phone editor has: blurred fill behind the whole frame.
+      const ar = ASPECTS[String(p.aspect)] || 9 / 16;
+      const th = even(clamp(ctx.height || 720, 240, 1280));
+      const tw = even(Math.round(th * ar));
+      return {
+        ownGeometry: true,
+        complex:
+          `[0:v]split=2[bg][fg];` +
+          `[bg]scale=${tw}:${th}:force_original_aspect_ratio=increase,` +
+          `crop=${tw}:${th},gblur=sigma=20[bgb];` +
+          `[fg]scale=${tw}:${th}:force_original_aspect_ratio=decrease[fgs];` +
+          `[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[v]`,
+        mapVideo: '[v]',
+      };
+    },
+  },
+
+  scale_by: {
+    label: 'Scale',
+    build(p, ctx) {
+      const f = clamp(num(p.factor, 0.5), 0.1, 4);
+      const w = even(clamp((ctx.width || 1280) * f, 16, 3840));
+      return { ownGeometry: true, filters: [`scale=${w}:-2`] };
+    },
+  },
+
+  zoom: {
+    label: 'Zoom',
+    build(p, ctx) {
+      const f = clamp(num(p.factor, 1.2), 1.01, 4);
+      // Crop first, then scale to the capped width. Cropping the *source* and
+      // upscaling once is far cheaper than scaling the whole frame up first.
+      const w = even(Math.min(MAX_EDIT_WIDTH, ctx.width || MAX_EDIT_WIDTH));
+      return {
+        ownGeometry: true,
+        filters: [`crop=iw/${f.toFixed(3)}:ih/${f.toFixed(3)}`, `scale=${w}:-2`],
+      };
+    },
+  },
+
+  add_border: {
+    label: 'Border',
+    build(p, ctx) {
+      const s = Math.round(clamp(num(p.size, 20), 1, 200));
+      const colour = /^[a-z]+$|^#[0-9a-f]{3,6}$/i.test(String(p.color || '')) ? p.color : 'white';
+      const pre = (ctx.width || 0) > MAX_EDIT_WIDTH ? [`scale='min(${MAX_EDIT_WIDTH},iw)':-2`] : [];
+      return { ownGeometry: true, filters: [...pre, `pad=iw+${s * 2}:ih+${s * 2}:${s}:${s}:${colour}`] };
+    },
+  },
+
+  /* ── added: motion ──────────────────────────────────────────────────────── */
+
+  timelapse: {
+    label: 'Timelapse',
+    build(p) {
+      const f = clamp(num(p.factor, 8), 2, 60);
+      // Drop audio: at 8x+ it is unusable anyway, and skipping atempo is faster.
+      return { filters: [`setpts=PTS/${f.toFixed(4)}`], mute: true };
+    },
+  },
+
+  boomerang: {
+    label: 'Boomerang',
+    build(p, ctx) {
+      if ((ctx.duration || 0) > 15) {
+        return { noop: 'Boomerang works on clips up to 15 seconds — trim it first.' };
+      }
+      return {
+        complex:
+          `[0:v]scale='min(${MAX_EDIT_WIDTH},iw)':-2,split=2[a][b];` +
+          `[b]reverse[r];[a][r]concat=n=2:v=1:a=0[v]`,
+        mapVideo: '[v]',
+        mute: true,
+      };
+    },
+  },
+
+  loop_video: {
+    label: 'Loop',
+    build(p, ctx) {
+      const n = Math.round(clamp(num(p.count, 2), 2, 10));
+      if ((ctx.duration || 0) * n > 120) {
+        return { noop: 'That would make a very long video — try a shorter clip.' };
+      }
+      const ins = Array.from({ length: n }, (_, i) => `[s${i}]`).join('');
+      return {
+        complex:
+          `[0:v]scale='min(${MAX_EDIT_WIDTH},iw)':-2,split=${n}` +
+          Array.from({ length: n }, (_, i) => `[s${i}]`).join('') + ';' +
+          `${ins}concat=n=${n}:v=1:a=0[v]`,
+        mapVideo: '[v]', mute: true,
+      };
+    },
+  },
+
+  stabilize: {
+    label: 'Stabilise',
+    build() {
+      // vidstab isn't in the wasm build; deshake is and needs no second pass.
+      // rx/ry=32 timed out (>90s on a 6s clip) — the search window is O(rx*ry)
+      // per block. 16 is the largest radius that stays interactive, and 960px
+      // keeps the block count down. Measured, not guessed.
+      // deshake REQUIRES rx/ry to be multiples of 16 (rx=12 fails the filter
+      // graph and yields a 0-byte file). 16 is therefore the minimum; the
+      // speed comes from capping resolution instead, since cost scales with
+      // pixel count. 720px keeps a 6s clip near ~20s.
+      return {
+        ownGeometry: true,
+        filters: [`scale='min(720,iw)':-2`, 'deshake=rx=16:ry=16:edge=mirror'],
+      };
+    },
+  },
+
+  hue_rotate: {
+    label: 'Hue shift',
+    build(p) {
+      const d = Math.round(num(p.degrees, 90)) % 360;
+      return { filters: [`hue=h=${d}`] };
+    },
+  },
+
+  /* ── added: audio ───────────────────────────────────────────────────────── */
+
+  normalize_audio: {
+    label: 'Normalise audio',
+    build(p, ctx) {
+      if (ctx.hasAudio === false) return { noop: 'This clip has no audio to normalise.' };
+      // Single-pass loudnorm to EBU R128; the two-pass version needs a probe.
+      return { audioFilters: ['loudnorm=I=-16:TP=-1.5:LRA=11'], reencodeVideo: false };
+    },
+  },
+
+  denoise_audio: {
+    label: 'Clean audio',
+    build(p, ctx) {
+      if (ctx.hasAudio === false) return { noop: 'This clip has no audio to clean.' };
+      return { audioFilters: ['highpass=f=80', 'afftdn=nf=-25', 'lowpass=f=15000'], reencodeVideo: false };
+    },
+  },
+
+  fade_audio: {
+    label: 'Audio fade',
+    build(p, ctx) {
+      if (ctx.hasAudio === false) return { noop: 'This clip has no audio to fade.' };
+      const d = clamp(num(p.duration, 1), 0.1, Math.max(0.2, (ctx.duration || 4) / 2));
+      const type = String(p.type || 'both');
+      const out = Math.max(0, (ctx.duration || 0) - d);
+      const f = [];
+      if (type === 'in' || type === 'both') f.push(`afade=t=in:st=0:d=${d.toFixed(2)}`);
+      if ((type === 'out' || type === 'both') && ctx.duration) f.push(`afade=t=out:st=${out.toFixed(2)}:d=${d.toFixed(2)}`);
+      return { audioFilters: f.length ? f : ['anull'], reencodeVideo: false };
+    },
+  },
+
+  /* ── added: delivery ────────────────────────────────────────────────────── */
+
+  compress: {
+    label: 'Compress',
+    build(p, ctx) {
+      const heavy = String(p.level || 'medium') === 'high';
+      const w = heavy ? 854 : 1280;
+      const src = ctx.width || 0;
+      return {
+        ownGeometry: true,
+        filters: [`scale='min(${w},iw)':-2`],
+        // A slower preset genuinely pays for itself here: the point is bytes.
+        encode: { preset: 'veryfast', crf: heavy ? 32 : 28 },
+        audioBitrate: heavy ? '96k' : '128k',
+        forceReencodeAudio: true,
+        _src: src,
+      };
     },
   },
 };
@@ -368,6 +571,36 @@ export const ALIASES = {
   screenshot: 'thumbnail',
   frame: 'thumbnail',
   audio: 'extract_audio',
+  // added ops
+  letterbox: 'pad_video',
+  pad: 'pad_video',
+  fit: 'pad_video',
+  blur_bg: 'blur_background',
+  background_blur: 'blur_background',
+  scale_percent: 'scale_by',
+  punch_in: 'zoom',
+  border: 'add_border',
+  time_lapse: 'timelapse',
+  hyperlapse: 'timelapse',
+  ping_pong: 'boomerang',
+  loop: 'loop_video',
+  repeat: 'loop_video',
+  deshake: 'stabilize',
+  stabilise: 'stabilize',
+  steady: 'stabilize',
+  hue: 'hue_rotate',
+  tint: 'hue_rotate',
+  normalize_volume: 'normalize_audio',
+  normalise_audio: 'normalize_audio',
+  loudnorm: 'normalize_audio',
+  clean_audio: 'denoise_audio',
+  audio_denoise: 'denoise_audio',
+  noise_reduction: 'denoise_audio',
+  audio_fade: 'fade_audio',
+  compress_video: 'compress',
+  reduce_size: 'compress',
+  optimize: 'compress',
+  optimise: 'compress',
 };
 
 export function resolveOperation(name) {
@@ -414,7 +647,7 @@ export function buildArgs(opName, params, ctx) {
     return {
       args: [
         '-i', inputName,
-        '-vf', `fps=${plan.gifFps},scale=${plan.gifWidth}:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse`,
+        '-vf', `fps=${plan.gifFps},scale=${plan.gifWidth}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer:bayer_scale=3`,
         '-loop', '0', 'out.gif',
       ],
       outputName: 'out.gif', mime: 'image/gif', ext: 'gif', kind: 'image', label: spec.label,
@@ -427,13 +660,20 @@ export function buildArgs(opName, params, ctx) {
   // for an identical-looking result. Ops that set their own geometry
   // (resize/crop) opt out via plan.ownGeometry.
   const filters = (plan.filters || []).slice();
-  if (!plan.ownGeometry && !plan.lossless && plan.reencodeVideo !== false) {
+  if (!plan.ownGeometry && !plan.complex && !plan.lossless && plan.reencodeVideo !== false) {
     const src = ctx.width || 0;
     if (!src || src > MAX_EDIT_WIDTH) {
       filters.unshift(`scale='min(${MAX_EDIT_WIDTH},iw)':-2`);
     }
   }
-  if (filters.length) args.push('-vf', filters.join(','));
+  // filter_complex (split/overlay/concat) is mutually exclusive with -vf.
+  if (plan.complex) {
+    args.push('-filter_complex', plan.complex);
+    if (plan.mapVideo) args.push('-map', plan.mapVideo);
+    if (!plan.mute && ctx.hasAudio && plan.mapAudio) args.push('-map', plan.mapAudio);
+  } else if (filters.length) {
+    args.push('-vf', filters.join(','));
+  }
   if (plan.audioFilters && plan.audioFilters.length) args.push('-af', plan.audioFilters.join(','));
   if (plan.mute) args.push('-an');
   if (plan.post) args.push(...plan.post);
@@ -446,14 +686,19 @@ export function buildArgs(opName, params, ctx) {
     args.push('-c:v', 'copy');
     if (!plan.mute && ctx.hasAudio) args.push('-c:a', 'aac', '-b:a', '160k');
   } else {
-    args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28');
+    // Ops that exist to shrink the file (compress) may ask for a slower
+    // preset: spending CPU is the entire point there.
+    const enc = plan.encode || {};
+    args.push('-c:v', 'libx264', '-preset', String(enc.preset || 'ultrafast'),
+      '-crf', String(enc.crf != null ? enc.crf : 28));
     args.push('-pix_fmt', 'yuv420p');
     // single-threaded core: -threads is a no-op and can confuse the muxer
     if (plan.mute) {
       /* -an already added */
     } else if (ctx.hasAudio) {
-      args.push('-c:a', plan.audioFilters ? 'aac' : 'copy');
-      if (plan.audioFilters) args.push('-b:a', '160k');
+      const reAudio = plan.audioFilters || plan.forceReencodeAudio;
+      args.push('-c:a', reAudio ? 'aac' : 'copy');
+      if (reAudio) args.push('-b:a', String(plan.audioBitrate || '160k'));
     }
   }
 

@@ -1,4 +1,10 @@
-import { buildArgs, num, clamp, even, atempoChain } from './operations.js';
+import { buildArgs, num, clamp, even, atempoChain, OPERATIONS } from './operations.js';
+import { parseCommand, describeSteps } from './parser.js';
+
+/** Pretty names for multi-step confirmations, derived from the registry. */
+const OPERATION_LABELS = Object.fromEntries(
+  Object.entries(OPERATIONS).map(([k, v]) => [k, (v.label || k).toLowerCase()])
+);
 
 // State
 let currentVideoBlob = null;
@@ -141,13 +147,12 @@ async function initFFmpeg() {
   return ffmpegInitPromise;
 }
 
-// Check for API key on load
+// Editing no longer requires an API key: the local parser understands most
+// commands offline. The key is optional and only widens the phrasing the app
+// can interpret, so never gate the upload behind it.
 window.addEventListener('DOMContentLoaded', () => {
-  const apiKey = localStorage.getItem('api_key');
-  if (apiKey) {
-    apiKeyBanner.style.display = 'none';
-    uploadZone.style.display = 'block';
-  }
+  if (apiKeyBanner) apiKeyBanner.style.display = 'none';
+  if (uploadZone) uploadZone.style.display = 'block';
 });
 
 // API key handling
@@ -268,12 +273,6 @@ async function sendMessage() {
   const text = chatInput.value.trim();
   if (!text || isProcessing || !currentVideoBlob) return;
 
-  const apiKey = localStorage.getItem('api_key');
-  if (!apiKey) {
-    addMessage('ai', 'Please set your API key first');
-    return;
-  }
-
   addMessage('user', text);
   chatInput.value = '';
   chatInput.style.height = 'auto';
@@ -281,46 +280,100 @@ async function sendMessage() {
   isProcessing = true;
 
   try {
-    // Get AI command
-    showProcessing('AI is thinking...');
-    const aiResponse = await fetch('/api/ai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command: text,
-        apiKey,
-        model: localStorage.getItem('model') || 'llama-3.3-70b-versatile',
-        // Clip context makes the parser far more accurate (e.g. "last 5 seconds")
-        meta: await probeVideo(currentVideoBlob).catch(() => ({})),
-      })
-    });
+    const meta = await probeVideo(currentVideoBlob).catch(() => ({}));
 
-    let aiData = {};
-    try {
-      aiData = await aiResponse.json();
-    } catch {
-      throw new Error(`Server returned an invalid response (HTTP ${aiResponse.status})`);
+    // 1) Try to understand the command locally. This handles the vast majority
+    //    of real requests with no API key, no network round-trip, and no
+    //    chance of a hallucinated operation — and it supports multi-step
+    //    commands, which the AI path could never express.
+    let steps = null;
+    let source = 'local';
+    const local = parseCommand(text, meta);
+
+    if (local.matched && local.unmatched.length === 0) {
+      steps = local.steps;
+    } else {
+      // 2) Fall back to the AI for phrasing the parser does not know.
+      const apiKey = localStorage.getItem('api_key');
+      if (!apiKey) {
+        if (local.matched) {
+          steps = local.steps;               // partial understanding beats nothing
+        } else {
+          addMessage('ai', didYouMean(text));
+          return;
+        }
+      } else {
+        showProcessing('Thinking...');
+        try {
+          const aiResponse = await fetch('/api/ai', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: text,
+              apiKey,
+              model: localStorage.getItem('model') || 'llama-3.3-70b-versatile',
+              meta,
+            }),
+          });
+          const aiData = await aiResponse.json().catch(() => ({}));
+          if (aiResponse.ok && aiData.success && aiData.result?.operation) {
+            steps = [aiData.result];
+            source = 'ai';
+            if (aiData.result.response) addMessage('ai', aiData.result.response);
+          }
+        } catch {
+          /* network/AI failure falls through to the local result below */
+        }
+        if (!steps && local.matched) steps = local.steps;
+        if (!steps) { addMessage('ai', didYouMean(text)); return; }
+      }
     }
 
-    if (!aiResponse.ok || !aiData.success) {
-      throw new Error(aiData.error || `AI request failed (HTTP ${aiResponse.status})`);
+    // 3) Run the plan. Multi-step commands chain: each step edits the result
+    //    of the previous one, and a failure stops the chain rather than
+    //    silently leaving the clip half-edited.
+    const multi = steps.length > 1;
+    if (multi) {
+      addMessage('ai', `On it — ${describeSteps(steps, OPERATION_LABELS)}.`);
     }
 
-    addMessage('ai', aiData.result.response || `Applying: ${aiData.result.description}`);
+    const t0 = performance.now();
+    for (let i = 0; i < steps.length; i++) {
+      const label = multi ? ` (${i + 1}/${steps.length})` : '';
+      showProcessing(`Processing${label}...`);
+      // Only the final step announces itself, so a chain reads as one action.
+      await processVideo(steps[i], { quiet: multi });
+    }
 
-    // Process video with FFmpeg
-    showProcessing('Processing video...');
-    await processVideo(aiData.result);
+    if (multi) {
+      const secs = ((performance.now() - t0) / 1000).toFixed(1);
+      addMessage('ai', `All ${steps.length} steps done in ${secs}s.`);
+    }
 
   } catch (err) {
     console.error('Send message error:', err);
-    console.error('Error stack:', err?.stack);
-    addMessage('ai', 'Error: ' + (err?.message || err?.toString() || String(err) || 'Unknown error'));
+    addMessage('ai', 'Error: ' + (err?.message || String(err) || 'Unknown error'));
   } finally {
     hideProcessing();
     sendBtn.disabled = false;
     isProcessing = false;
   }
+}
+
+/** Friendly, specific fallback when nothing matched. */
+function didYouMean(text) {
+  const t = String(text).toLowerCase();
+  const hints = [
+    [/\b(?:music|song|soundtrack|audio track|add sound)\b/, "I can't add new audio yet — but I can mute, clean, normalise or fade the existing track."],
+    [/\b(?:merge|join|combine|stitch|append|two videos|another video)\b/, 'I can only edit one clip at a time right now — joining clips isn\u2019t supported yet.'],
+    [/\b(?:green ?screen|chroma|remove background|cut out)\b/, "Background removal isn't supported yet. Try 'blur the background' for a similar look."],
+    [/\b(?:subtitle|transcri|caption file|srt)\b/, "I can't auto-transcribe yet, but you can add text: try: add text saying Your Words."],
+    [/\b(?:upscale|enhance quality|4k|sharper quality)\b/, "I can resize up, but I can't invent detail. Try 'resize to 1080p' or 'sharpen'."],
+  ];
+  for (const [re, msg] of hints) if (re.test(t)) return msg;
+  return "I didn't catch that. Try things like: 'trim the first 5 seconds', " +
+         "'make it black and white', 'crop for TikTok', 'speed it up 2x', " +
+         "'add text saying Hello', or 'compress it'. You can chain them with 'and'.";
 }
 
 /**
@@ -384,7 +437,7 @@ function probeVideo(blob) {
   });
 }
 
-async function processVideo(operation) {
+async function processVideo(operation, opts = {}) {
   const meta = await probeVideo(currentVideoBlob);
 
   const ctx = {
@@ -470,7 +523,11 @@ async function processVideo(operation) {
       currentVideoUrl = URL.createObjectURL(blob);
       videoPlayer.src = currentVideoUrl;
       videoMetaCache = null;               // dimensions/duration may have changed
-      addMessage('ai', `Done in ${secs}s · ${mb} MB${ffmpegIsMT ? '' : ' · single-threaded'}`);
+      // On a multi-step chain only the final step reports, so the transcript
+      // reads as one action instead of a wall of timings.
+      if (!opts.quiet) {
+        addMessage('ai', `Done in ${secs}s · ${mb} MB`);
+      }
       updateUndoButton();
     } else {
       // Image or audio side-output: offer it as a download, keep the video as-is
