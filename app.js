@@ -402,3 +402,9 @@ function hideProcessing() {
   processingIndicator.style.display = 'none';
   progressFill.style.width = '0%';
 }
+
+// Migration: Clear old Gemini settings
+if (localStorage.getItem('gemini_model')) {
+  localStorage.removeItem('gemini_model');
+  localStorage.removeItem('api_key');
+}
