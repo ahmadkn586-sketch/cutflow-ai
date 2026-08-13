@@ -46,57 +46,53 @@ module.exports = async (req, res) => {
   }
 
   // Only allow models this app actually supports
+  // Optional clip context from the client (duration/size) improves parsing
+  const meta = body.meta || {};
+  const ctxLine = meta.duration
+    ? `\nCLIP: ${Number(meta.duration).toFixed(1)}s long, ${meta.width || '?'}x${meta.height || '?'}, ${meta.hasAudio === false ? 'NO audio track' : 'has audio'}.\n`
+    : '';
+
   const ALLOWED_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
   const selectedModel = ALLOWED_MODELS.includes(model) ? model : ALLOWED_MODELS[0];
 
   try {
-    const prompt = `You are an AI video editor assistant. The user wants to edit a video.
+    const prompt = `You are the command parser for a browser video editor.
+Convert the user's request into ONE operation.
 
 USER COMMAND: "${command}"
+${ctxLine}
+AVAILABLE OPERATIONS (use these names exactly):
 
-AVAILABLE OPERATIONS AND THEIR PARAMETERS:
+trim_video     { "start": seconds, "duration": seconds }   also accepts "end"
+resize_video   { "width": px, "height": px }
+crop_video     { "aspect": "9:16"|"1:1"|"4:5"|"16:9"|"4:3" }  or { width,height,x,y }
+adjust_speed   { "speed": 2.0 }          2 = twice as fast, 0.5 = half
+speed_up       { "factor": 2 }
+slow_motion    { "factor": 2 }           2 = half speed
+mute_audio     { }
+adjust_volume  { "level": 1.5 }          1 = unchanged
+color_grade    { "grade": "warm"|"cool"|"vintage"|"cinematic"|"teal"|"noir"|"dramatic"|"bright"|"faded" }
+add_effect     { "effect": "blur"|"gblur"|"sharpen"|"grayscale"|"sepia"|"vintage"|"emboss"|"edge"|"negate"|"vignette"|"pixelate"|"noise"|"denoise"|"brightness"|"contrast"|"saturation", "intensity": 0-100 }
+rotate         { "degrees": 90|180|270 }
+flip           { "direction": "horizontal"|"vertical" }
+fade           { "type": "in"|"out"|"both", "duration": seconds }
+reverse        { }                       clips under 30s only
+add_text       { "text": "...", "position": "top"|"middle"|"bottom", "size": px, "color": "white" }
+change_fps     { "fps": 30 }
+extract_audio  { }                       exports an mp3
+to_gif         { "fps": 12, "width": 480 }   clips under 15s only
+thumbnail      { "time": seconds }       exports a jpg
 
-1. trim_video - Cut the video to a specific range
-   Parameters: { "start": 0, "duration": 10 }
+RULES
+- Pick the single closest operation. Never invent an operation name.
+- "make it pop"/"cinematic"/"film look" -> color_grade
+- "for TikTok/Reels/Shorts/vertical" -> crop_video with aspect 9:16
+- "for Instagram square" -> crop_video with aspect 1:1
+- Omit parameters you are unsure about; sensible defaults are applied.
+- "response" must be one short friendly sentence, no markdown.
 
-2. add_effect - Apply a visual effect
-   Parameters: { "effect": "blur|sharpen|brightness|contrast|saturation|grayscale|sepia|vintage", "intensity": 50 }
-
-3. adjust_speed - Change playback speed
-   Parameters: { "speed": 2.0 }
-
-4. crop_video - Crop to specific dimensions
-   Parameters: { "width": 1280, "height": 720, "x": 0, "y": 0 }
-
-5. resize_video - Resize to specific dimensions
-   Parameters: { "width": 1920, "height": 1080 }
-
-6. mute_audio - Remove all audio
-
-7. adjust_volume - Change audio volume
-   Parameters: { "level": 1.5 }
-
-8. color_grade - Apply color grading
-   Parameters: { "grade": "warm|cool|cinematic|vintage" }
-
-9. add_filter - Apply a video filter
-   Parameters: { "filter": "blur|sharpen|emboss|edge" }
-
-10. slow_motion - Slow down video
-    Parameters: { "factor": 2 }
-
-11. speed_up - Speed up video
-    Parameters: { "factor": 2 }
-
-Respond with ONLY a valid JSON object (no markdown, no explanation outside JSON):
-{
-  "operation": "operation_name",
-  "parameters": {},
-  "description": "Brief description of what this edit does",
-  "response": "Friendly casual message to the user about what you did"
-}
-
-Be specific with parameters.`;
+Respond with ONLY this JSON:
+{"operation":"","parameters":{},"description":"","response":""}`;
 
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',

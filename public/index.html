@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CutFlow AI</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M21 9v14l-11-7z' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles/main.css">
 </head>
 <body>
@@ -48,6 +49,7 @@
         <div class="project-name" id="project-name">Untitled</div>
       </div>
       <div class="top-bar-right">
+        <button class="btn btn-ghost" id="undo-btn" disabled>Undo</button>
         <button class="btn btn-ghost" id="settings-btn">Settings</button>
         <button class="btn btn-primary" id="export-btn">Export</button>
       </div>
@@ -63,6 +65,7 @@
             <div class="progress-bar">
               <div class="progress-fill" id="progress-fill"></div>
             </div>
+            <button class="btn btn-ghost" id="cancel-btn" style="margin-top:12px;">Cancel</button>
           </div>
         </div>
 
@@ -100,10 +103,16 @@
             <div class="message-content">
               <p>Upload a video and tell me what to edit. I can apply effects, adjust speed, trim, and more.</p>
               <div class="suggestion-chips">
-                <button class="chip" data-command="Apply cinematic color grade">Cinematic grade</button>
+                <button class="chip" data-command="Apply cinematic color grade">Cinematic</button>
                 <button class="chip" data-command="Trim first 5 seconds">Trim 5s</button>
                 <button class="chip" data-command="Speed up 2x">Speed 2x</button>
-                <button class="chip" data-command="Add blur effect">Blur</button>
+                <button class="chip" data-command="Crop to 9:16 vertical">Vertical 9:16</button>
+                <button class="chip" data-command="Rotate 90 degrees">Rotate</button>
+                <button class="chip" data-command="Make it black and white">B&amp;W</button>
+                <button class="chip" data-command="Fade in and out over 1 second">Fade</button>
+                <button class="chip" data-command="Add text saying CutFlow at the bottom">Add text</button>
+                <button class="chip" data-command="Convert to a GIF">To GIF</button>
+                <button class="chip" data-command="Mute the audio">Mute</button>
               </div>
             </div>
           </div>
@@ -150,6 +159,6 @@
   </div>
 
   <script src="/ffmpeg/ffmpeg.js"></script>
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>
