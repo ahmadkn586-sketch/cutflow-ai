@@ -31,6 +31,27 @@ const landingSaveKey = document.getElementById('landing-save-key');
 
 // Initialize FFmpeg
 let ffmpegInitPromise = null;
+let ffmpegIsMT = false;
+let videoHasAudioCache = null;
+
+/**
+ * The multithreaded core needs SharedArrayBuffer, which browsers only expose in
+ * a cross-origin-isolated context (COOP: same-origin + COEP: require-corp).
+ * Those headers are set in vercel.json.
+ */
+function isMultithreadSupported() {
+  return (
+    typeof SharedArrayBuffer !== 'undefined' &&
+    typeof self.crossOriginIsolated !== 'undefined' &&
+    self.crossOriginIsolated === true
+  );
+}
+
+/** Leave a core free so the UI stays responsive; cap at 8 (diminishing returns). */
+function threadCount() {
+  const n = navigator.hardwareConcurrency || 4;
+  return Math.max(1, Math.min(8, n - 1));
+}
 
 async function initFFmpeg() {
   if (ffmpeg && ffmpeg.loaded) return ffmpeg;
@@ -53,29 +74,40 @@ async function initFFmpeg() {
         if (processingText && pct > 0) processingText.textContent = `Processing video... ${pct}%`;
       });
 
-      // Do NOT pass any worker URL option here. Two separate traps in
-      // @ffmpeg/ffmpeg 0.12.x:
+      // Do NOT pass `classWorkerURL`. Two traps in @ffmpeg/ffmpeg 0.12.x:
       //
-      //  1. `classWorkerURL` is resolved against a path baked in at the library's
-      //     BUILD time — "file:///home/jeromewu/ffmpeg.wasm/.../classes.js". A
-      //     root-relative value like "/ffmpeg/814.ffmpeg.js" therefore becomes
-      //     file:///ffmpeg/814.ffmpeg.js, which the browser refuses with
-      //     "Failed to construct 'Worker' ... cannot be accessed from origin".
+      //  1. It is resolved against a path baked in at the library's BUILD time —
+      //     "file:///home/jeromewu/ffmpeg.wasm/.../classes.js" — so a root-relative
+      //     value becomes file:///ffmpeg/814.ffmpeg.js and the browser refuses it.
+      //  2. It also forces {type:"module"}, but that worker calls importScripts(),
+      //     which does not exist in module workers.
       //
-      //  2. `classWorkerURL` also forces {type:"module"}, but this worker calls
-      //     importScripts(), which does not exist inside a module worker. So even
-      //     a fully-qualified https URL fails on the following line.
+      // Omitting it lets webpack's automatic publicPath derive the URL from where
+      // ffmpeg.js was served, giving <origin>/ffmpeg/814.ffmpeg.js as a CLASSIC
+      // worker — already correct, since we ship it alongside ffmpeg.js.
       //
-      // With the option omitted, webpack's automatic publicPath derives the worker
-      // URL from wherever ffmpeg.js itself was served (document.currentScript.src),
-      // producing <origin>/ffmpeg/814.ffmpeg.js as a CLASSIC worker. Since we ship
-      // 814.ffmpeg.js right next to ffmpeg.js in public/ffmpeg/, that is already
-      // correct and same-origin. coreURL/wasmURL are still passed explicitly so the
-      // 32MB core loads locally instead of from unpkg.
-      await ffmpeg.load({
-        coreURL: '/ffmpeg/ffmpeg-core.js',
-        wasmURL: '/ffmpeg/ffmpeg-core.wasm',
-      });
+      // `workerURL` is a DIFFERENT option, consumed inside the worker by the core
+      // itself for its pthread pool. The multithreaded core requires it.
+      const mt = isMultithreadSupported();
+
+      if (mt) {
+        // ~4-8x faster: real pthreads across CPU cores. Requires SharedArrayBuffer,
+        // which requires the COOP/COEP headers set in vercel.json.
+        await ffmpeg.load({
+          coreURL: '/ffmpeg/mt/ffmpeg-core.js',
+          wasmURL: '/ffmpeg/mt/ffmpeg-core.wasm',
+          workerURL: '/ffmpeg/mt/ffmpeg-core.worker.js',
+        });
+      } else {
+        // Fallback for browsers without crossOriginIsolated (e.g. older Safari)
+        await ffmpeg.load({
+          coreURL: '/ffmpeg/st/ffmpeg-core.js',
+          wasmURL: '/ffmpeg/st/ffmpeg-core.wasm',
+        });
+      }
+
+      ffmpegIsMT = mt;
+      console.log(`[ffmpeg] loaded ${mt ? 'MULTI-threaded' : 'single-threaded'} core (${navigator.hardwareConcurrency || '?'} cores)`);
 
       return ffmpeg;
     } catch (err) {
@@ -137,8 +169,16 @@ async function handleVideoFile(file) {
   currentVideoUrl = URL.createObjectURL(file);
   videoPlayer.src = currentVideoUrl;
   projectName.textContent = file.name.replace(/\.[^/.]+$/, '');
-  
+
   switchToEditor();
+
+  // Start fetching the ~32MB core NOW, while the user is typing their first
+  // command, instead of waiting until they hit send. Usually hides the entire
+  // load time. Errors are ignored here — processVideo() awaits it properly.
+  initFFmpeg().catch(() => {});
+
+  // Cache the audio-track check so we don't redo it on every single edit
+  videoHasAudioCache = null;
 }
 
 function switchToEditor() {
@@ -261,6 +301,18 @@ async function sendMessage() {
 
 async function processVideo(operation) {
   console.log('Processing operation:', operation);
+
+  // Set expectations up front. FFmpeg.wasm is far slower than native, so a long
+  // clip can take minutes — say so rather than letting it look frozen.
+  const dur = videoPlayer.duration;
+  const lossless = operation.operation === 'trim_video' ||
+                   operation.operation === 'mute_audio' ||
+                   operation.operation === 'adjust_volume';
+  if (Number.isFinite(dur) && dur > 60 && !lossless) {
+    addMessage('ai', `Heads up: this clip is ${Math.round(dur / 60)} min. Re-encoding in the browser is slow — expect a few minutes. Short clips are much quicker.`);
+  }
+
+  const t0 = performance.now();
   
   // Ensure FFmpeg is initialized and loaded
   const ffmpegInstance = await initFFmpeg();
@@ -379,9 +431,34 @@ async function processVideo(operation) {
         throw new Error(`Unknown operation: ${operation.operation}`);
     }
 
-    // Re-encode to a browser-playable MP4. Without yuv420p + faststart the
-    // output often plays audio-only or not at all in Chrome/Safari.
-    args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p');
+    // ── Encoder settings ─────────────────────────────────────────────────────
+    // Trimming touches no pixels, so stream-copy instead of re-encoding. This is
+    // the single biggest speedup available: seconds-long jobs become instant.
+    const isLosslessTrim = operation.operation === 'trim_video';
+    // Audio-only operations leave every pixel untouched, so copy the video
+    // stream verbatim rather than burning CPU re-encoding it.
+    const audioOnlyOp = operation.operation === 'mute_audio' || operation.operation === 'adjust_volume';
+
+    if (isLosslessTrim) {
+      args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero');
+    } else if (audioOnlyOp) {
+      args.push('-c:v', 'copy');
+      if (!args.includes('-an')) args.push('-c:a', 'aac');
+    } else {
+      args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency');
+      // CRF 28 is visually close to the default 23 but encodes markedly faster
+      // and produces a much smaller file.
+      args.push('-crf', '28');
+      args.push('-pix_fmt', 'yuv420p');
+      // Explicit thread count; without it the MT core often runs single-threaded
+      if (ffmpegIsMT) args.push('-threads', String(threadCount()));
+      // Only re-encode audio when a filter actually altered it
+      const audioFiltered = args.includes('-filter:a') || args.includes('-af');
+      if (hasAudio && !args.includes('-an')) {
+        args.push('-c:a', audioFiltered ? 'aac' : 'copy');
+      }
+    }
+
     args.push('-movflags', '+faststart');
     args.push(outputName);
 
@@ -401,7 +478,9 @@ async function processVideo(operation) {
     currentVideoUrl = URL.createObjectURL(blob);
     videoPlayer.src = currentVideoUrl;
     
-    addMessage('ai', '✓ Video processed successfully');
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    const mb = (blob.size / 1048576).toFixed(1);
+    addMessage('ai', `✓ Done in ${secs}s · ${mb} MB${ffmpegIsMT ? '' : ' (single-threaded mode)'}`);
 
   } catch (err) {
     console.error('FFmpeg error:', err);
@@ -516,6 +595,8 @@ function atempoChain(speed) {
  * aborts with "Stream specifier ':a' matches no streams".
  */
 function videoHasAudio(blob) {
+  // Probing spins up a <video> element and waits on metadata; cache per clip
+  if (videoHasAudioCache !== null) return Promise.resolve(videoHasAudioCache);
   return new Promise((resolve) => {
     try {
       const el = document.createElement('video');
@@ -524,6 +605,7 @@ function videoHasAudio(blob) {
       const done = (result) => {
         URL.revokeObjectURL(url);
         el.removeAttribute('src');
+        videoHasAudioCache = result;
         resolve(result);
       };
       const timer = setTimeout(() => done(true), 3000); // assume audio if unknown
