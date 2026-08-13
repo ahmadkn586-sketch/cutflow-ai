@@ -53,13 +53,28 @@ async function initFFmpeg() {
         if (processingText && pct > 0) processingText.textContent = `Processing video... ${pct}%`;
       });
 
-      // NOTE: the option is `classWorkerURL`, NOT `workerURL`.
-      // `workerURL` is silently ignored by @ffmpeg/ffmpeg 0.12.x, so the library
-      // fell back to its bundled worker path and threw a cross-origin error.
+      // Do NOT pass any worker URL option here. Two separate traps in
+      // @ffmpeg/ffmpeg 0.12.x:
+      //
+      //  1. `classWorkerURL` is resolved against a path baked in at the library's
+      //     BUILD time — "file:///home/jeromewu/ffmpeg.wasm/.../classes.js". A
+      //     root-relative value like "/ffmpeg/814.ffmpeg.js" therefore becomes
+      //     file:///ffmpeg/814.ffmpeg.js, which the browser refuses with
+      //     "Failed to construct 'Worker' ... cannot be accessed from origin".
+      //
+      //  2. `classWorkerURL` also forces {type:"module"}, but this worker calls
+      //     importScripts(), which does not exist inside a module worker. So even
+      //     a fully-qualified https URL fails on the following line.
+      //
+      // With the option omitted, webpack's automatic publicPath derives the worker
+      // URL from wherever ffmpeg.js itself was served (document.currentScript.src),
+      // producing <origin>/ffmpeg/814.ffmpeg.js as a CLASSIC worker. Since we ship
+      // 814.ffmpeg.js right next to ffmpeg.js in public/ffmpeg/, that is already
+      // correct and same-origin. coreURL/wasmURL are still passed explicitly so the
+      // 32MB core loads locally instead of from unpkg.
       await ffmpeg.load({
         coreURL: '/ffmpeg/ffmpeg-core.js',
         wasmURL: '/ffmpeg/ffmpeg-core.wasm',
-        classWorkerURL: '/ffmpeg/814.ffmpeg.js',
       });
 
       return ffmpeg;
