@@ -30,17 +30,33 @@ const landingApiKey = document.getElementById('landing-api-key');
 const landingSaveKey = document.getElementById('landing-save-key');
 
 // Initialize FFmpeg
+let ffmpegInitPromise = null;
+
 async function initFFmpeg() {
-  if (ffmpeg) return ffmpeg;
+  if (ffmpeg && ffmpeg.loaded) return ffmpeg;
   
-  ffmpeg = new FFmpegWASM.FFmpeg();
-  const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd';
-  await ffmpeg.load({
-    coreURL: `${baseURL}/ffmpeg-core.js`,
-    wasmURL: `${baseURL}/ffmpeg-core.wasm`,
-  });
+  // If already initializing, wait for that promise
+  if (ffmpegInitPromise) return ffmpegInitPromise;
   
-  return ffmpeg;
+  ffmpegInitPromise = (async () => {
+    try {
+      const { FFmpeg } = FFmpegWASM;
+      ffmpeg = new FFmpeg();
+      
+      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd';
+      await ffmpeg.load({
+        coreURL: `${baseURL}/ffmpeg-core.js`,
+        wasmURL: `${baseURL}/ffmpeg-core.wasm`,
+      });
+      
+      return ffmpeg;
+    } catch (err) {
+      ffmpegInitPromise = null; // Reset on failure so we can retry
+      throw err;
+    }
+  })();
+  
+  return ffmpegInitPromise;
 }
 
 // Check for API key on load
@@ -93,12 +109,6 @@ async function handleVideoFile(file) {
   currentVideoUrl = URL.createObjectURL(file);
   videoPlayer.src = currentVideoUrl;
   projectName.textContent = file.name.replace(/\.[^/.]+$/, '');
-  
-  // Initialize FFmpeg in background
-  initFFmpeg().catch(err => {
-    console.error('FFmpeg init failed:', err);
-    addMessage('ai', 'Warning: Video processing may not work. Your browser might not support WebAssembly.');
-  });
   
   switchToEditor();
 }
@@ -215,15 +225,21 @@ async function sendMessage() {
 }
 
 async function processVideo(operation) {
+  // Ensure FFmpeg is initialized and loaded
+  const ffmpegInstance = await initFFmpeg();
+  
+  // Double-check it's actually loaded
+  if (!ffmpegInstance || !ffmpegInstance.loaded) {
+    throw new Error('FFmpeg is not ready. Please try again.');
+  }
+  
   try {
-    const ffmpeg = await initFFmpeg();
-    
     // Write input file
     const inputName = 'input.mp4';
     const outputName = 'output.mp4';
     
     const fileData = await currentVideoBlob.arrayBuffer();
-    await ffmpeg.writeFile(inputName, new Uint8Array(fileData));
+    await ffmpegInstance.writeFile(inputName, new Uint8Array(fileData));
 
     // Build FFmpeg command based on operation
     const args = ['-i', inputName];
@@ -303,10 +319,10 @@ async function processVideo(operation) {
     args.push(outputName);
 
     // Run FFmpeg
-    await ffmpeg.exec(args);
+    await ffmpegInstance.exec(args);
 
     // Read output
-    const data = await ffmpeg.readFile(outputName);
+    const data = await ffmpegInstance.readFile(outputName);
     const blob = new Blob([data.buffer], { type: 'video/mp4' });
     
     // Update video
