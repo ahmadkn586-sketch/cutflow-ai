@@ -205,6 +205,7 @@ async function sendMessage() {
     });
 
     const aiData = await aiResponse.json();
+    console.log('AI response:', aiData);
 
     if (!aiData.success) {
       throw new Error(aiData.error || 'AI command failed');
@@ -217,7 +218,9 @@ async function sendMessage() {
     await processVideo(aiData.result);
 
   } catch (err) {
-    addMessage('ai', 'Error: ' + err.message);
+    console.error('Send message error:', err);
+    console.error('Error stack:', err?.stack);
+    addMessage('ai', 'Error: ' + (err?.message || err?.toString() || String(err) || 'Unknown error'));
   } finally {
     hideProcessing();
     sendBtn.disabled = false;
@@ -226,6 +229,8 @@ async function sendMessage() {
 }
 
 async function processVideo(operation) {
+  console.log('Processing operation:', operation);
+  
   // Ensure FFmpeg is initialized and loaded
   const ffmpegInstance = await initFFmpeg();
   
@@ -319,6 +324,7 @@ async function processVideo(operation) {
     
     args.push(outputName);
 
+    console.log('FFmpeg command:', args);
     // Run FFmpeg
     await ffmpegInstance.exec(args);
 
@@ -338,7 +344,10 @@ async function processVideo(operation) {
 
   } catch (err) {
     console.error('FFmpeg error:', err);
-    throw new Error('Video processing failed: ' + err.message);
+    console.error('Error type:', typeof err);
+    console.error('Error keys:', Object.keys(err || {}));
+    const errorMsg = err?.message || err?.toString() || String(err) || 'Unknown error';
+    throw new Error('Video processing failed: ' + errorMsg);
   }
 }
 
