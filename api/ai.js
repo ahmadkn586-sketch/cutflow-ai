@@ -96,6 +96,16 @@ normalize_audio{ }                       even out loudness
 denoise_audio  { }                       remove hiss/background noise
 fade_audio     { "type": "in"|"out"|"both", "duration": seconds }
 compress       { "level": "medium"|"high" }   smaller file
+aura_edit      { "style": "purple"|"blue"|"red"|"gold"|"green"|"pink"|"white"|"dark", "intensity": 10-100 }
+               THE signature look: 9:16 + glow bloom + punchy colour + grain
+aura           { "style": ..., "intensity": ... }   same look, keeps current framing
+glow           { "intensity": 10-100 }   bloom only, no colour push
+chroma_shift   { "intensity": 1-12 }     rgb split / glitch
+shake          { "intensity": 10-100 }   handheld camera shake
+punch_zoom     { "bpm": 120, "intensity": 10-100 }   zoom pulse on the beat
+speed_ramp     { "at": 0.4, "slow": 2, "fast": 2 }   slow then snap fast
+film_grain     { "intensity": 4-60 }
+vhs            { }                       retro tape look
 
 RULES
 - Pick the single closest operation. Never invent an operation name.
@@ -105,6 +115,8 @@ RULES
 - "smaller file"/"for WhatsApp"/"reduce size" -> compress
 - "shaky"/"steady" -> stabilize
 - "fit without cropping"/"letterbox" -> pad_video
+- "aura edit"/"edit of me/him/her"/"make me an edit" -> aura_edit
+- A colour before "aura" is the style: "purple aura" -> aura style purple
 - Only ONE operation. The client handles multi-step commands itself.
 - Omit parameters you are unsure about; sensible defaults are applied.
 - "response" must be one short friendly sentence, no markdown.

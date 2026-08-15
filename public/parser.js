@@ -104,10 +104,58 @@ function splitClauses(text) {
   return parts.length ? parts : [text];
 }
 
+/** Colour + strength for the aura family, pulled out of the raw phrasing. */
+function auraParams(t) {
+  const colour = (t.match(/\b(purple|violet|blue|cyan|red|crimson|gold(?:en)?|yellow|green|pink|magenta|white|dark|black)\b/) || [])[1];
+  const map = {
+    violet: 'purple', cyan: 'blue', crimson: 'red', golden: 'gold',
+    yellow: 'gold', magenta: 'pink', black: 'dark',
+  };
+  const style = colour ? (map[colour] || colour) : undefined;
+  let intensity;
+  const p = pct(t);
+  if (p !== null) intensity = p * 100;
+  else if (/\b(?:subtle|light|slight|soft|barely|little)\b/.test(t)) intensity = 30;
+  else if (/\b(?:heavy|strong|max|intense|crazy|insane|hard|extreme|super)\b/.test(t)) intensity = 95;
+  const out = {};
+  if (style) out.style = style;
+  if (intensity !== undefined) out.intensity = intensity;
+  return out;
+}
+
 /* ── rules ────────────────────────────────────────────────────────────────── */
 /* Ordered: the FIRST match wins, so put specific patterns before generic ones. */
 
 const RULES = [
+  /* ---- aura / edit culture (checked early: these phrases win) ---- */
+  {
+    // "aura edit", "make me an edit", "edit of him" -> the full look.
+    re: /\baura\s*edit\b|\bedit\s*(?:of|for)\s+(?:me|him|her|them|us|this|my)\b|\bmake\s+(?:me\s+)?an?\s+edit\b|\bfull\s+edit\b|\bedit\s+me\b/,
+    op: (m, t) => ({ operation: 'aura_edit', parameters: auraParams(t) }),
+  },
+  {
+    re: /\baura\b/,
+    op: (m, t) => ({
+      // "aura" alone: full edit if they mention a platform/vertical, else just
+      // the look applied to the existing framing.
+      operation: /\b(?:tiktok|reels?|shorts?|vertical|9[:x\/]16|post)\b/.test(t) ? 'aura_edit' : 'aura',
+      parameters: auraParams(t),
+    }),
+  },
+  { re: /\b(?:glow|bloom|shine|radiant|light leak|dreamy)\b/, op: (m, t) => ({ operation: 'glow', parameters: { intensity: pct(t) !== null ? pct(t) * 100 : firstNum(t, 60) } }) },
+  { re: /\b(?:chromatic|chroma shift|rgb split|colou?r fringe|glitch)\b/, op: (m, t) => ({ operation: 'chroma_shift', parameters: { intensity: firstNum(t, 3) } }) },
+  { re: /\b(?:vhs|retro tape|camcorder|old tape|90s look|80s look)\b/, op: () => ({ operation: 'vhs', parameters: {} }) },
+  { re: /\b(?:film grain|grainy|add grain)\b/, op: (m, t) => ({ operation: 'film_grain', parameters: { intensity: firstNum(t, 20) } }) },
+  { re: /\b(?:shake|shaky cam|handheld|earthquake|rumble)\b/, op: (m, t) => ({ operation: 'shake', parameters: { intensity: pct(t) !== null ? pct(t) * 100 : firstNum(t, 50) } }) },
+  {
+    re: /\b(?:punch|beat|bounce|pulse|bpm|zoom to the (?:beat|music)|sync)\b/,
+    op: (m, t) => {
+      const bpmM = t.match(/(\d{2,3})\s*bpm/);
+      return { operation: 'punch_zoom', parameters: { bpm: bpmM ? +bpmM[1] : 120, intensity: 50 } };
+    },
+  },
+  { re: /\b(?:speed ramp|ramp|slow then fast|time ramp)\b/, op: () => ({ operation: 'speed_ramp', parameters: {} }) },
+
   /* ---- aspect / platform ---- */
   {
     re: /\b(?:tiktok|tik tok|reels?|shorts?|vertical|portrait|9[:x\/]16)\b/,
