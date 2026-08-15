@@ -69,6 +69,16 @@
           </div>
         </div>
 
+        <!-- Clip strip: app.js has always wired these three IDs, but they were
+             never in the markup, so app.js threw on EVERY page load and every
+             handler defined after it (undo, cancel, export, chips) silently
+             never bound. -->
+        <div class="clip-strip">
+          <div class="clip-list" id="clip-list"></div>
+          <button class="btn btn-ghost" id="add-clip-btn">+ Add clip</button>
+          <input type="file" id="add-clip-input" accept="video/*" multiple hidden>
+        </div>
+
         <div class="timeline-container">
           <div class="timeline-controls">
             <button class="timeline-btn" id="play-btn">
