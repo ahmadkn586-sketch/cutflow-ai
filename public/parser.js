@@ -123,10 +123,73 @@ function auraParams(t) {
   return out;
 }
 
+/** Tempo, defaulting to the 120bpm most short-form edits sit near. */
+function bpmOf(t, fallback = 120) {
+  const m = t.match(/(\d{2,3})\s*bpm/);
+  if (m) return +m[1];
+  if (/\bfast|hard|hype|aggressive\b/.test(t)) return 140;
+  if (/\bslow|chill|calm\b/.test(t)) return 90;
+  return fallback;
+}
+
+/** "at 3s" / "at 2.5 seconds" / "after 4s" -> seconds. */
+function atTime(t) {
+  const m = t.match(/\b(?:at|after|on|around)\s+(\d+(?:\.\d+)?)\s*(?:s\b|sec|secs|second|seconds)/);
+  return m ? parseFloat(m[1]) : null;
+}
+
+/** Which library sound the user asked for. */
+function sfxOf(t) {
+  if (/\b(?:whoosh|swoosh|woosh|swish|swipe|transition sound)\b/.test(t)) return 'whoosh';
+  if (/\b(?:riser|build[\s-]?up|rise|tension)\b/.test(t)) return 'riser';
+  if (/\b(?:sub\s*drop|bass\s*drop|bass|sub|808|boom)\b/.test(t)) return 'subdrop';
+  if (/\b(?:impact|hit|slam|punch sound|bang|thud|kick)\b/.test(t)) return 'impact';
+  if (/\b(?:tick|click|tap|snap)\b/.test(t)) return 'tick';
+  if (/\b(?:rev|engine|vroom|exhaust)\b/.test(t)) return 'rev';
+  return null;
+}
+
 /* ── rules ────────────────────────────────────────────────────────────────── */
 /* Ordered: the FIRST match wins, so put specific patterns before generic ones. */
 
 const RULES = [
+  /* ---- sound design + car edits (must precede aura: "car edit" contains "edit") ---- */
+  {
+    // "car edit", "hard edit", "edit like shaheer" -> the full treatment with SFX.
+    re: /\bcar\s*edit\b|\bhard\s*edit\b|\b(?:car|automotive|vehicle)\s+(?:montage|reel|video)\b|\bedit\s+(?:my|this|the)\s+(?:car|whip|ride|bmw|mercedes|audi|porsche|benz)\b|\bcinematic\s+car\b/,
+    op: (m, t) => {
+      const params = { bpm: bpmOf(t), intensity: /\b(?:heavy|hard|crazy|insane|max|extreme)\b/.test(t) ? 95 : 70 };
+      if (/\bno\s+(?:rev|engine)\b/.test(t)) params.rev = false;
+      if (/\b(?:mute|no)\s+(?:the\s+)?(?:original|original audio|music)\b/.test(t)) params.mute = true;
+      if (/\b(?:horizontal|landscape|16[:x\/]9|widescreen)\b/.test(t)) params.vertical = false;
+      return { operation: 'car_edit', parameters: params };
+    },
+  },
+  {
+    // "add sfx on every beat", "impacts to the beat at 128bpm"
+    re: /\b(?:sfx|sound\s*effects?|sounds?|impacts?|hits?|whooshes)\b[^.]*\b(?:every\s+beat|on\s+(?:the\s+)?beat|to\s+the\s+beat|beat\s*sync(?:ed|hronis\w+)?|each\s+beat)\b|\bbeat\s*sync(?:ed|hronis\w+)?\s+(?:sfx|sounds?|effects?)\b/,
+    op: (m, t) => {
+      const p = { bpm: bpmOf(t), sfx: sfxOf(t) || 'impact' };
+      if (/\bevery\s+(?:other|2nd|second)\s+beat\b/.test(t)) p.every = 2;
+      if (/\bevery\s+(?:4th|fourth|bar)\b/.test(t)) p.every = 4;
+      if (/\breplace\b|\bonly\b|\bmute\b/.test(t)) p.replace = true;
+      return { operation: 'beat_sfx', parameters: p };
+    },
+  },
+  {
+    // "add a whoosh", "put a bass drop at 3s", "sfx only"
+    re: /\b(?:add|put|insert|drop|give\s+me|want|need|include)\b[^.]*\b(?:sfx|sound\s*effects?|whoosh|swoosh|woosh|riser|build[\s-]?up|sub\s*drop|bass\s*drop|808|impact|slam|thud|boom|tick|click|rev|engine sound|vroom)\b|^\s*(?:whoosh|swoosh|riser|bass\s*drop|sub\s*drop|impact|boom|rev)\s*$/,
+    op: (m, t) => {
+      const p = { sfx: sfxOf(t) || 'whoosh' };
+      const at = atTime(t);
+      if (at !== null) p.at = at;
+      if (/\b(?:sfx|sound)s?\s+only\b|\breplace\s+(?:the\s+)?audio\b|\bmute\s+(?:the\s+)?original\b/.test(t)) p.replace = true;
+      if (/\b(?:loud|louder|hard|heavy)\b/.test(t)) p.gain = 1.6;
+      if (/\b(?:quiet|quieter|subtle|soft|light)\b/.test(t)) p.gain = 0.6;
+      return { operation: 'add_sfx', parameters: p };
+    },
+  },
+
   /* ---- aura / edit culture (checked early: these phrases win) ---- */
   {
     // "aura edit", "make me an edit", "edit of him" -> the full look.

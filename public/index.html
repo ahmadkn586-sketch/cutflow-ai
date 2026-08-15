@@ -12,7 +12,7 @@
   <div id="landing-screen" class="screen active">
     <div class="landing-container">
       <h1 class="logo">CutFlow AI</h1>
-      <p class="tagline">Edit videos with natural language</p>
+      <p class="tagline">Car edits, aura edits and beat-synced SFX — just describe it</p>
 
       <div class="api-key-banner" id="api-key-banner">
         <p>Enter your free Groq API key to get started</p>
@@ -34,9 +34,10 @@
       <input type="file" id="video-upload" accept="video/*" hidden>
 
       <div class="features">
-        <div class="feature">Chat to edit</div>
-        <div class="feature">Effects & filters</div>
-        <div class="feature">Auto captions</div>
+        <div class="feature">Beat-synced SFX</div>
+        <div class="feature">Aura & car edits</div>
+        <div class="feature">Runs in your browser</div>
+        <div class="feature">No API key needed</div>
       </div>
     </div>
   </div>
@@ -111,9 +112,15 @@
           <div class="message ai-message">
             <div class="message-avatar">AI</div>
             <div class="message-content">
-              <p>Upload a video and tell me what to edit. I can apply effects, adjust speed, trim, and more.</p>
+              <p>Tell me what to make. Try a car edit with beat-locked whooshes and sub drops, an aura edit, or just ask for a single sound.</p>
               <div class="suggestion-chips">
-                <button class="chip" data-command="Make an aura edit">✨ Aura edit</button>
+                <button class="chip chip-hero" data-command="Make a car edit at 128 bpm">Car edit</button>
+                <button class="chip chip-hero" data-command="Make an aura edit">Aura edit</button>
+                <button class="chip chip-hero" data-command="Add sfx on every beat at 128 bpm">Beat SFX</button>
+                <button class="chip" data-command="Add a whoosh">Whoosh</button>
+                <button class="chip" data-command="Add a bass drop">Bass drop</button>
+                <button class="chip" data-command="Add an impact sound">Impact</button>
+                <button class="chip" data-command="Add a riser">Riser</button>
                 <button class="chip" data-command="Purple aura edit">Purple aura</button>
                 <button class="chip" data-command="Gold aura edit">Gold aura</button>
                 <button class="chip" data-command="Add a glow">Glow</button>
