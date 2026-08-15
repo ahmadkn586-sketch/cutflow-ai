@@ -144,15 +144,29 @@ export const OPERATIONS = {
       // Aspect-ratio crop is far more useful than raw pixels for social formats
       const ar = p.aspect && ASPECTS[String(p.aspect)];
       if (ar) {
-        let w = vw, h = Math.round(vw / ar);
-        if (h > vh) { h = vh; w = Math.round(vh * ar); }
-        return { filters: [`crop=${even(w)}:${even(h)}:${Math.floor((vw - w) / 2)}:${Math.floor((vh - h) / 2)}`], ownGeometry: true };
+        // Express the crop RELATIVE to the real input (iw/ih) rather than the
+        // probed size. If probing failed or is stale, absolute pixels can
+        // exceed the frame and ffmpeg writes a 0-byte file; min() can't.
+        const arStr = ar.toFixed(6);
+        return {
+          ownGeometry: true,
+          filters: [
+            `crop='min(iw,ih*${arStr})':'min(ih,iw/${arStr})':` +
+              `'(iw-min(iw,ih*${arStr}))/2':'(ih-min(ih,iw/${arStr}))/2'`,
+            // Guarantee even dimensions for H.264 after a dynamic crop.
+            `scale=trunc(iw/2)*2:trunc(ih/2)*2`,
+          ],
+        };
       }
       const w = even(clamp(num(p.width, vw), 16, vw));
       const h = even(clamp(num(p.height, vh), 16, vh));
       const x = Math.floor(clamp(num(p.x, (vw - w) / 2), 0, Math.max(0, vw - w)));
       const y = Math.floor(clamp(num(p.y, (vh - h) / 2), 0, Math.max(0, vh - h)));
-      return { filters: [`crop=${w}:${h}:${x}:${y}`], ownGeometry: true };
+      // Clamp against the real frame so a stale probe can't overflow it.
+      return {
+        ownGeometry: true,
+        filters: [`crop='min(${w},iw)':'min(${h},ih)':'min(${x},iw-ow)':'min(${y},ih-oh)'`],
+      };
     },
   },
 
@@ -533,6 +547,236 @@ export const OPERATIONS = {
       };
     },
   },
+
+  /* ── aura / edit-culture looks ──────────────────────────────────────────── */
+
+  aura_edit: {
+    label: 'Aura edit',
+    build(p, ctx) {
+      // The full one-command look: crop to 9:16, bloom the highlights, push
+      // colour, add grain and a vignette — everything an "aura edit of a
+      // person" needs, in a single pass so it stays fast.
+      const preset = AURA_PRESETS[String(p.style || p.color || '').toLowerCase()] || AURA_PRESETS.default;
+      const intensity = clamp(num(p.intensity, 70), 10, 100) / 100;
+      const sigma = (14 + intensity * 14).toFixed(1);
+      const opacity = (0.55 + intensity * 0.45).toFixed(2);
+      const vertical = p.vertical !== false;
+
+      // Target frame: 9:16 because that is how these get posted. 960 tall, not
+      // 1152: measured 33.0s vs 40.1s on a 6s clip for detail nobody sees on a
+      // phone. crf 28 rather than 24 is the same speed for 1.7 MB vs 3.9 MB.
+      const outH = vertical ? 960 : 540;
+      const outW = vertical ? even(Math.round(outH * 9 / 16)) : even(Math.round(outH * 16 / 9));
+
+      const frame = vertical
+        ? `scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH}`
+        : `scale='min(${auraWidth(ctx)},iw)':-2`;
+      const baseTint = preset.baseTint ? `,${preset.baseTint}` : '';
+      const glowTint = preset.glowTint ? `,${preset.glowTint}` : '';
+
+      return {
+        ownGeometry: true,
+        complex:
+          `[0:v]${frame}${baseTint},split=2[base][gl];` +
+          `[gl]curves=all='0/0 ${preset.crush}/0 1/1',gblur=sigma=${sigma}${glowTint}[g];` +
+          `[base][g]blend=all_mode=screen:all_opacity=${opacity},` +
+          `eq=contrast=${preset.contrast}:saturation=${preset.saturation}${preset.grade},` +
+          `noise=alls=8:allf=t,vignette=PI/4,setsar=1[v]`,
+        mapVideo: '[v]',
+        encode: { crf: 28 },
+      };
+    },
+  },
+
+  aura: {
+    label: 'Aura',
+    build(p, ctx) {
+      // The "aura edit" look: bright areas bloom into a soft glow, colour is
+      // pushed hard, edges fall off. Built from curves (crush shadows to black)
+      // → gblur (bloom) → screen blend (add light back only where it's bright),
+      // the FFmpeg equivalent of the Deep Glow workflow editors use.
+      const preset = AURA_PRESETS[String(p.style || p.color || '').toLowerCase()] || AURA_PRESETS.default;
+      const intensity = clamp(num(p.intensity, 65), 10, 100) / 100;
+      const w = auraWidth(ctx);
+      const sigma = (14 + intensity * 14).toFixed(1);
+      const opacity = (0.55 + intensity * 0.45).toFixed(2);
+
+      const baseTint = preset.baseTint ? `,${preset.baseTint}` : '';
+      const glowTint = preset.glowTint ? `,${preset.glowTint}` : '';
+      return {
+        ownGeometry: true,
+        complex:
+          `[0:v]scale='min(${w},iw)':-2${baseTint},split=2[base][gl];` +
+          `[gl]curves=all='0/0 ${preset.crush}/0 1/1',gblur=sigma=${sigma}${glowTint}[g];` +
+          `[base][g]blend=all_mode=screen:all_opacity=${opacity},` +
+          `eq=contrast=${preset.contrast}:saturation=${preset.saturation}${preset.grade}` +
+          `,vignette=PI/4,setsar=1[v]`,
+        mapVideo: '[v]',
+        encode: { crf: 26 },
+      };
+    },
+  },
+
+  glow: {
+    label: 'Glow',
+    build(p, ctx) {
+      // Pure bloom, no colour push — for people who want the light, not the grade.
+      const intensity = clamp(num(p.intensity, 60), 10, 100) / 100;
+      const w = auraWidth(ctx);
+      return {
+        ownGeometry: true,
+        complex:
+          `[0:v]scale='min(${w},iw)':-2,split=2[base][gl];` +
+          `[gl]curves=all='0/0 0.45/0 1/1',gblur=sigma=${(12 + intensity * 16).toFixed(1)}[g];` +
+          `[base][g]blend=all_mode=screen:all_opacity=${(0.5 + intensity * 0.5).toFixed(2)},setsar=1[v]`,
+        mapVideo: '[v]',
+        encode: { crf: 26 },
+      };
+    },
+  },
+
+  chroma_shift: {
+    label: 'Chromatic shift',
+    build(p, ctx) {
+      const amt = Math.round(clamp(num(p.intensity, 3), 1, 12));
+      const w = auraWidth(ctx);
+      return {
+        ownGeometry: true,
+        filters: [`scale='min(${w},iw)':-2`, `rgbashift=rh=-${amt}:bh=${amt}`],
+      };
+    },
+  },
+
+  shake: {
+    label: 'Shake',
+    build(p, ctx) {
+      // Camera-shake via a zoompan wobble. Zoom in slightly first so the frame
+      // never exposes an edge as it moves.
+      const amt = clamp(num(p.intensity, 50), 10, 100) / 100;
+      const px = Math.round(4 + amt * 14);
+      const w = auraWidth(ctx);
+      return {
+        ownGeometry: true,
+        filters: [
+          `scale='min(${w},iw)':-2`,
+          `crop=iw-${px * 2}:ih-${px * 2}:` +
+            `'${px}+${px}*sin(n*0.7)':'${px}+${px}*cos(n*0.9)'`,
+        ],
+        encode: { crf: 24 },
+      };
+    },
+  },
+
+  punch_zoom: {
+    label: 'Punch zoom',
+    build(p, ctx) {
+      // Rhythmic zoom pulse — the beat-sync move every edit uses. bpm drives
+      // the pulse rate; without audio analysis this is the honest approximation.
+      const bpm = clamp(num(p.bpm, 120), 40, 240);
+      const strength = clamp(num(p.intensity, 50), 10, 100) / 100;
+      const amp = (0.02 + strength * 0.06).toFixed(4);
+      const hz = (bpm / 60).toFixed(4);
+      const w = auraWidth(ctx);
+      const fps = 30;
+      // crop CANNOT change size per frame (it produced a 0-byte file), so the
+      // pulse has to come from zoompan, which resamples to a fixed output size.
+      // zoompan needs concrete dimensions, so resolve them here.
+      const outW = even(Math.min(w, ctx.width || w));
+      const outH = even(Math.round(outW * ((ctx.height || 720) / (ctx.width || 1280))));
+      return {
+        ownGeometry: true,
+        filters: [
+          `scale=${outW}:${outH}`,
+          `zoompan=z='1+${amp}*(0.5+0.5*sin(on/${fps}*${hz}*2*PI))':d=1:s=${outW}x${outH}:fps=${fps}`,
+        ],
+        encode: { crf: 24 },
+      };
+    },
+  },
+
+  speed_ramp: {
+    label: 'Speed ramp',
+    build(p, ctx) {
+      // Slow, then snap to fast — the classic edit transition. Implemented as
+      // two trimmed segments concatenated, since setpts alone can't ramp.
+      const d = ctx.duration || 0;
+      if (d < 1.5) return { noop: 'Speed ramps need a clip of at least 1.5 seconds.' };
+      const split = (d * clamp(num(p.at, 0.4), 0.15, 0.85)).toFixed(3);
+      const slow = clamp(num(p.slow, 2), 1.2, 4);
+      const fast = clamp(num(p.fast, 2), 1.2, 6);
+      const w = auraWidth(ctx);
+      return {
+        ownGeometry: true,
+        complex:
+          `[0:v]scale='min(${w},iw)':-2,split=2[a][b];` +
+          `[a]trim=0:${split},setpts=PTS*${slow.toFixed(3)}[s];` +
+          `[b]trim=${split},setpts=(PTS-STARTPTS)/${fast.toFixed(3)}[f];` +
+          `[s][f]concat=n=2:v=1:a=0[v]`,
+        mapVideo: '[v]',
+        mute: true,
+        encode: { crf: 24 },
+      };
+    },
+  },
+
+  film_grain: {
+    label: 'Film grain',
+    build(p, ctx) {
+      const amt = Math.round(clamp(num(p.intensity, 20), 4, 60));
+      const w = auraWidth(ctx);
+      return {
+        ownGeometry: true,
+        filters: [`scale='min(${w},iw)':-2`, `noise=alls=${amt}:allf=t+u`],
+        encode: { crf: 24 },
+      };
+    },
+  },
+
+  vhs: {
+    label: 'VHS',
+    build(p, ctx) {
+      const w = auraWidth(ctx);
+      return {
+        ownGeometry: true,
+        filters: [
+          `scale='min(${w},iw)':-2`,
+          'rgbashift=rh=-3:bh=3',
+          'noise=alls=14:allf=t',
+          'eq=contrast=1.1:saturation=1.25:brightness=0.02',
+          'vignette=PI/5',
+        ],
+        encode: { crf: 24 },
+      };
+    },
+  },
+};
+
+/* ── aura presets ─────────────────────────────────────────────────────────── */
+
+/**
+ * Aura work is expensive (split + blur + blend on every frame), so it runs at
+ * 720px rather than the usual 1280px cap. Vertical output is what these edits
+ * are for anyway, and it roughly halves the render time.
+ */
+function auraWidth(ctx) {
+  return Math.min(720, ctx && ctx.width ? ctx.width : 720);
+}
+
+const AURA_PRESETS = {
+  // Verified visually, not guessed. The first attempt used lumakey to isolate
+  // highlights, but blend=screen IGNORES alpha, so the whole tinted frame got
+  // screened on and the result was a flat purple wash over everything.
+  // The fix is `curves` to crush shadows to actual BLACK — screen-blending
+  // black is a no-op, so the glow only appears where the frame is bright.
+  default: { crush: 0.4, baseTint: '',                                        glowTint: '',                                            contrast: 1.18, saturation: 1.35, grade: '' },
+  purple:  { crush: 0.4, baseTint: 'colorchannelmixer=rr=1.05:bb=1.15',       glowTint: 'colorchannelmixer=rr=1.3:bb=1.6:gg=0.85',     contrast: 1.18, saturation: 1.4,  grade: '' },
+  blue:    { crush: 0.4, baseTint: 'colorchannelmixer=rr=0.95:bb=1.15',       glowTint: 'colorchannelmixer=rr=0.8:bb=1.7:gg=1.0',      contrast: 1.18, saturation: 1.35, grade: '' },
+  red:     { crush: 0.4, baseTint: 'colorchannelmixer=rr=1.12:bb=0.95',       glowTint: 'colorchannelmixer=rr=1.7:bb=0.85:gg=0.85',    contrast: 1.2,  saturation: 1.4,  grade: '' },
+  gold:    { crush: 0.4, baseTint: 'colorchannelmixer=rr=1.1:gg=1.04:bb=0.9', glowTint: 'colorchannelmixer=rr=1.6:gg=1.3:bb=0.6',      contrast: 1.18, saturation: 1.4,  grade: '' },
+  green:   { crush: 0.4, baseTint: 'colorchannelmixer=gg=1.1:rr=0.96',        glowTint: 'colorchannelmixer=gg=1.6:rr=0.85:bb=0.9',     contrast: 1.18, saturation: 1.35, grade: '' },
+  pink:    { crush: 0.4, baseTint: 'colorchannelmixer=rr=1.1:bb=1.08',        glowTint: 'colorchannelmixer=rr=1.65:bb=1.35:gg=0.9',    contrast: 1.18, saturation: 1.4,  grade: '' },
+  white:   { crush: 0.45, baseTint: '',                                       glowTint: '',                                            contrast: 1.14, saturation: 1.2,  grade: '' },
+  dark:    { crush: 0.55, baseTint: '',                                       glowTint: '',                                            contrast: 1.35, saturation: 1.15, grade: ':brightness=-0.04' },
 };
 
 /* ── aliases the AI (or a user) is likely to produce ──────────────────────── */
@@ -601,6 +845,22 @@ export const ALIASES = {
   reduce_size: 'compress',
   optimize: 'compress',
   optimise: 'compress',
+  // aura family
+  aura_effect: 'aura',
+  auras: 'aura',
+  glow_effect: 'glow',
+  bloom: 'glow',
+  rgb_split: 'chroma_shift',
+  chromatic_aberration: 'chroma_shift',
+  glitch: 'chroma_shift',
+  camera_shake: 'shake',
+  handheld: 'shake',
+  beat_zoom: 'punch_zoom',
+  zoom_pulse: 'punch_zoom',
+  ramp: 'speed_ramp',
+  grain: 'film_grain',
+  retro: 'vhs',
+  full_edit: 'aura_edit',
 };
 
 export function resolveOperation(name) {
