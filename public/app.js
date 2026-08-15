@@ -12,6 +12,14 @@ let currentVideoUrl = null;
 let isProcessing = false;
 let ffmpeg = null;
 
+// Multi-clip state. `clips` is the source list the user assembled; whenever
+// it changes we re-merge into a single `currentVideoBlob` so every existing
+// single-clip operation (trim, effects, export...) keeps working unmodified.
+let clips = [];             // { id, file, name, duration }
+let clipIdCounter = 0;
+let isMerging = false;
+let unmatchedStreak = 0;    // consecutive commands the local parser couldn't understand
+
 // Elements
 const landingScreen = document.getElementById('landing-screen');
 const editorScreen = document.getElementById('editor-screen');
@@ -36,6 +44,9 @@ const timeline = document.getElementById('timeline');
 const apiKeyBanner = document.getElementById('api-key-banner');
 const landingApiKey = document.getElementById('landing-api-key');
 const landingSaveKey = document.getElementById('landing-save-key');
+const clipList = document.getElementById('clip-list');
+const addClipBtn = document.getElementById('add-clip-btn');
+const addClipInput = document.getElementById('add-clip-input');
 
 // Initialize FFmpeg
 let ffmpegInitPromise = null;
@@ -180,32 +191,225 @@ uploadZone.addEventListener('dragleave', () => {
 uploadZone.addEventListener('drop', (e) => {
   e.preventDefault();
   uploadZone.classList.remove('dragover');
-  const file = e.dataTransfer.files[0];
-  if (file && file.type.startsWith('video/')) {
-    handleVideoFile(file);
-  }
+  const files = Array.from(e.dataTransfer.files || []).filter(f => f.type.startsWith('video/'));
+  if (files.length) handleVideoFiles(files);
 });
 
 videoUpload.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (file) handleVideoFile(file);
+  const files = Array.from(e.target.files || []);
+  if (files.length) handleVideoFiles(files);
+  videoUpload.value = ''; // allow re-selecting the same file later
 });
 
-async function handleVideoFile(file) {
-  currentVideoBlob = file;
-  currentVideoUrl = URL.createObjectURL(file);
-  videoPlayer.src = currentVideoUrl;
-  projectName.textContent = file.name.replace(/\.[^/.]+$/, '');
+// "Add clip" — appends to the existing project instead of starting over.
+addClipBtn.addEventListener('click', () => {
+  if (isMerging || isProcessing) return;
+  addClipInput.click();
+});
 
+addClipInput.addEventListener('change', (e) => {
+  const files = Array.from(e.target.files || []);
+  if (files.length) addClips(files);
+  addClipInput.value = '';
+});
+
+/** Entry point for the FIRST upload (landing screen) — one or many files. */
+async function handleVideoFiles(files) {
   switchToEditor();
+  initFFmpeg().catch(() => {}); // start fetching the core early, see below
 
-  // Start fetching the ~32MB core NOW, while the user is typing their first
-  // command, instead of waiting until they hit send. Usually hides the entire
-  // load time. Errors are ignored here — processVideo() awaits it properly.
-  initFFmpeg().catch(() => {});
+  clips = [];
+  clipIdCounter = 0;
+  projectName.textContent = files[0].name.replace(/\.[^/.]+$/, '');
 
-  // Cache the audio-track check so we don't redo it on every single edit
-  videoMetaCache = null;
+  await addClips(files);
+}
+
+/** Append one or more clips to the project, then re-merge. */
+async function addClips(files) {
+  for (const file of files) {
+    clips.push({ id: ++clipIdCounter, file, name: file.name, duration: null });
+  }
+  renderClips();
+  await mergeClips();
+}
+
+function removeClip(id) {
+  if (isMerging || isProcessing) return;
+  clips = clips.filter(c => c.id !== id);
+  renderClips();
+  if (clips.length) mergeClips();
+  else addMessage('ai', 'All clips removed — add a new one to continue.');
+}
+
+function moveClip(id, dir) {
+  if (isMerging || isProcessing) return;
+  const i = clips.findIndex(c => c.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= clips.length) return;
+  [clips[i], clips[j]] = [clips[j], clips[i]];
+  renderClips();
+  mergeClips();
+}
+
+function renderClips() {
+  clipList.innerHTML = '';
+  clips.forEach((clip, i) => {
+    const item = document.createElement('div');
+    item.className = 'clip-item';
+    item.innerHTML = `
+      <span class="clip-index">${i + 1}</span>
+      <span class="clip-name" title="${clip.name}">${clip.name}</span>
+    `;
+    const up = document.createElement('button');
+    up.textContent = '↑';
+    up.title = 'Move earlier';
+    up.disabled = i === 0;
+    up.addEventListener('click', () => moveClip(clip.id, -1));
+
+    const down = document.createElement('button');
+    down.textContent = '↓';
+    down.title = 'Move later';
+    down.disabled = i === clips.length - 1;
+    down.addEventListener('click', () => moveClip(clip.id, 1));
+
+    const remove = document.createElement('button');
+    remove.textContent = '✕';
+    remove.title = 'Remove clip';
+    remove.disabled = clips.length <= 1;
+    remove.addEventListener('click', () => removeClip(clip.id));
+
+    item.append(up, down, remove);
+    clipList.appendChild(item);
+  });
+  addClipBtn.disabled = isMerging || isProcessing;
+}
+
+/**
+ * Rebuild `currentVideoBlob` from the `clips` array.
+ *
+ * A single clip needs no work — it just becomes the current video, exactly
+ * like the old single-upload flow. Two or more clips are normalised to a
+ * common codec/resolution/framerate (concat demuxer requires matching
+ * streams) and stitched with `-f concat -c copy`, which is fast because the
+ * expensive re-encode only happens once per clip, not once per merge.
+ */
+async function mergeClips() {
+  if (!clips.length) return;
+  isMerging = true;
+  addClipBtn.disabled = true;
+  showProcessing(clips.length > 1 ? 'Combining clips...' : 'Loading...');
+
+  try {
+    if (clips.length === 1) {
+      const file = clips[0].file;
+      if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
+      currentVideoBlob = file;
+      currentVideoUrl = URL.createObjectURL(file);
+      videoPlayer.src = currentVideoUrl;
+      videoMetaCache = null;
+      return;
+    }
+
+    const ffmpegInstance = await withTimeout(initFFmpeg(), 90000, 'FFmpeg startup');
+    if (!ffmpegInstance || !ffmpegInstance.loaded) {
+      throw new Error('FFmpeg failed to start. Reload the page and try again.');
+    }
+
+    // Probe every clip so we can pick a common target size (largest clip's
+    // width, capped) instead of guessing — mismatched streams are the #1
+    // reason concat demuxer silently drops audio or video.
+    const metas = await Promise.all(clips.map(c => probeFile(c.file)));
+    const targetW = Math.min(1280, Math.max(...metas.map(m => m.width || 1280)));
+    const targetH = even(Math.round(targetW * ((metas[0].height || 720) / (metas[0].width || 1280))));
+
+    const written = [];
+    const normalisedNames = [];
+    try {
+      for (let i = 0; i < clips.length; i++) {
+        const inName = `src${i}.mp4`;
+        const outName = `norm${i}.mp4`;
+        const data = new Uint8Array(await clips[i].file.arrayBuffer());
+        await ffmpegInstance.writeFile(inName, data);
+        written.push(inName);
+
+        // Re-encode each clip to the same codec/resolution/fps/sample-rate so
+        // the concat demuxer can just copy-stitch them afterward. A clip with
+        // no audio stream at all needs a second lavfi input generating
+        // silence — you cannot apply an audio filter to a stream that
+        // doesn't exist, which would otherwise fail exactly on clips like
+        // "clip2-silent".
+        const vf = `scale=${even(targetW)}:${targetH}:force_original_aspect_ratio=decrease,pad=${even(targetW)}:${targetH}:(ow-iw)/2:(oh-ih)/2,fps=30`;
+        const args = metas[i].hasAudio
+          ? ['-i', inName, '-vf', vf, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
+             '-c:a', 'aac', '-ar', '44100', '-ac', '2', outName]
+          : ['-i', inName, '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+             '-vf', vf, '-map', '0:v:0', '-map', '1:a:0',
+             '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-c:a', 'aac', '-shortest', outName];
+        await withTimeout(ffmpegInstance.exec(args), 120000, `Normalising clip ${i + 1}`);
+        written.push(outName);
+        normalisedNames.push(outName);
+      }
+
+      const listContent = normalisedNames.map(n => `file '${n}'`).join('\n');
+      await ffmpegInstance.writeFile('concat_list.txt', new TextEncoder().encode(listContent));
+      written.push('concat_list.txt');
+
+      await withTimeout(
+        ffmpegInstance.exec(['-f', 'concat', '-safe', '0', '-i', 'concat_list.txt', '-c', 'copy', 'merged.mp4']),
+        60000,
+        'Combining clips'
+      );
+      written.push('merged.mp4');
+
+      const data = await ffmpegInstance.readFile('merged.mp4');
+      if (!data || data.byteLength === 0) throw new Error('Combining clips produced an empty file.');
+
+      const blob = new Blob([data.buffer], { type: 'video/mp4' });
+      if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
+      currentVideoBlob = blob;
+      currentVideoUrl = URL.createObjectURL(blob);
+      videoPlayer.src = currentVideoUrl;
+      videoMetaCache = null;
+      addMessage('ai', `Combined ${clips.length} clips.`);
+    } finally {
+      for (const f of written) {
+        try { await ffmpegInstance.deleteFile(f); } catch {}
+      }
+    }
+  } catch (err) {
+    console.error('Merge error:', err);
+    addMessage('ai', 'Error combining clips: ' + (err?.message || String(err)));
+  } finally {
+    isMerging = false;
+    addClipBtn.disabled = false;
+    hideProcessing();
+  }
+}
+
+/** Probe a raw File (before it's the "current" video) for merge sizing. */
+function probeFile(file) {
+  return new Promise((resolve) => {
+    const fallback = { duration: 0, width: 1280, height: 720, hasAudio: true };
+    const el = document.createElement('video');
+    el.preload = 'metadata';
+    el.muted = true;
+    const url = URL.createObjectURL(file);
+    const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve(fallback); }, 5000);
+    el.onloadedmetadata = () => {
+      clearTimeout(timer);
+      const meta = {
+        duration: Number.isFinite(el.duration) ? el.duration : 0,
+        width: el.videoWidth || 1280,
+        height: el.videoHeight || 720,
+        hasAudio: Boolean(el.mozHasAudio || el.webkitAudioDecodedByteCount > 0 || (el.audioTracks && el.audioTracks.length > 0)),
+      };
+      URL.revokeObjectURL(url);
+      resolve(meta);
+    };
+    el.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(url); resolve(fallback); };
+    el.src = url;
+  });
 }
 
 function switchToEditor() {
@@ -292,6 +496,7 @@ async function sendMessage() {
 
     if (local.matched && local.unmatched.length === 0) {
       steps = local.steps;
+      unmatchedStreak = 0;
     } else {
       // 2) Fall back to the AI for phrasing the parser does not know.
       const apiKey = localStorage.getItem('api_key');
@@ -299,10 +504,19 @@ async function sendMessage() {
         if (local.matched) {
           steps = local.steps;               // partial understanding beats nothing
         } else {
-          addMessage('ai', didYouMean(text));
+          unmatchedStreak++;
+          let hint = didYouMean(text);
+          // After a couple of misses in a row, surface the AI fallback option —
+          // otherwise it's easy to sit in this state indefinitely without
+          // knowing a free API key would widen what's understood.
+          if (unmatchedStreak >= 2) {
+            hint += ' Tip: adding a free Groq API key in Settings lets me understand phrasing like this too.';
+          }
+          addMessage('ai', hint);
           return;
         }
       } else {
+        unmatchedStreak = 0;
         showProcessing('Thinking...');
         try {
           const aiResponse = await fetch('/api/ai', {
